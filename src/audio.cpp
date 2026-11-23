@@ -41,7 +41,7 @@ bool Audio::Open(const wchar_t* path,Settings s,bool shuffle,std::wstring& error
         if(info_.radio)channels_=2;
         for(const auto& link:info_.links)if(link.channels!=channels_)channels_=2;
     }
-    rate_=settings_.rate?settings_.rate:source_rate_;SetTitle(info_);Gain();return true;
+    rate_=settings_.rate?settings_.rate:source_rate_;SetTitle(info_);Gain();++metadata_revision_;return true;
 }
 void Audio::Gain(){
     const auto& tags=info_.current.tags;double db=settings_.preamp_q8/256.;if(info_.radio)db=settings_.radio_preamp_q8/256.;
@@ -82,14 +82,19 @@ void Audio::Gain(){
 int Audio::Read(float* out,int capacity){
     last_exact_=false;
     if(!reader_||!out||capacity<1||capacity>BlockFrames)return -1;int n=reader_->Read(scratch_.data(),capacity);
-    if(n<=0){info_.duration_ms=reader_->Info().duration_ms;return n;}
-    const auto& next=reader_->Info();bool changed=next.current_link!=info_.current_link||next.current.rate!=info_.current.rate||next.current.channels!=info_.current.channels;
-    if(changed){auto path=std::move(info_.path);info_=next;info_.path=std::move(path);info_.station=stream_->Info();info_.radio=stream_->Radio();}
-    if(info_.station.title!=stream_->Info().title||info_.station.recording_error!=stream_->Info().recording_error){info_.station=stream_->Info();changed=true;}
+    if(n<=0){const auto duration=reader_->Info().duration_ms;if(info_.duration_ms!=duration){info_.duration_ms=duration;++metadata_revision_;}return n;}
+    const auto& next=reader_->Info();
+    const bool link_changed=next.current_link!=info_.current_link;
+    bool changed=link_changed||next.current.rate!=info_.current.rate||next.current.channels!=info_.current.channels||
+        next.current.bitrate!=info_.current.bitrate||next.current.frames!=info_.current.frames;
+    if(changed){auto path=std::move(info_.path);auto title=std::move(info_.title);auto station=std::move(info_.station);info_=next;info_.path=std::move(path);info_.title=std::move(title);info_.station=std::move(station);info_.radio=stream_->Radio();}
+    bool title_changed=link_changed;
+    if(info_.duration_ms!=next.duration_ms){info_.duration_ms=next.duration_ms;changed=true;}
+    if(info_.station.title!=stream_->Info().title||info_.station.recording_error!=stream_->Info().recording_error){title_changed|=info_.station.title!=stream_->Info().title;info_.station=stream_->Info();changed=true;}
     source_rate_=info_.current.rate;
     int source=info_.current.channels;if(source<1||source>8||source_rate_<1000||source_rate_>768000){error_=L"The stream changed to an unsupported format.";return -1;}
     if(negotiate_){channels_=OutputChannels(settings_.channels,source);rate_=settings_.rate?settings_.rate:source_rate_;}
-    if(gain_link_!=info_.current_link)Gain();if(changed)SetTitle(info_);
+    if(gain_link_!=info_.current_link)Gain();if(title_changed)SetTitle(info_);if(changed)++metadata_revision_;
     const bool raw=settings_.channels==ChannelMode::LegacyUnmapped&&channels_==source;
     if(!reader_->WindowsOrder()&&!raw){
         if(source==6&&settings_.legacy_51_order)for(int f=0;f<n;++f)std::swap(scratch_[f*source+1],scratch_[f*source+2]);
@@ -117,7 +122,7 @@ void Audio::FallbackToStereo(float* pending,int frames){
     channels_=2;settings_.channels=ChannelMode::Stereo;
 }
 void Audio::Cancel()noexcept{cancelled_=true;std::shared_ptr<ByteStream> source;{std::lock_guard<std::mutex> guard(stream_mutex_);source=stream_;}if(source)source->Cancel();}
-bool Audio::Seek(int ms){last_exact_=false;if(!reader_||!reader_->Seek(ms))return false;gain_link_=-1;return true;}
+bool Audio::Seek(int ms){last_exact_=false;return reader_&&reader_->Seek(ms);}
 Pcm::Pcm(Audio& a,Settings s):audio_(a),settings_(Validate(s)),rate_(a.Rate()),channels_(a.Channels()){
     quantizer_=std::make_unique<Quantizer>(settings_,channels_,rate_);
     ready_=SetRate(audio_.SourceRate());

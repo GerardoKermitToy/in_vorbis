@@ -2,8 +2,13 @@
 
 ## Final build and regression results
 
-- Independent `C:\in_vorbis` build: **14/14 Release**, **14/14 Debug** tests passed.
-- Combined `C:\winamp` build: **25/25 Release**, **25/25 Debug** tests passed.
+- The earlier independent periodic playlist fix passed **15/15 Release** and
+  **15/15 Debug** tests (21.43 s / 36.20 s). The later seek cleanup, expanded
+  notification scenarios and separately staged DLLs are recorded below.
+- Combined `C:\winamp` build with both notification regressions: **30/30 Release**,
+  **30/30 Debug** tests passed.
+- The original 1.2.0 baseline had 14/14 independent and 25/25 combined tests; its
+  archive and DLL hashes remain recorded in the baseline package section.
 - MSVC/Visual Studio 2022, Win32/x86, source-built codecs, dynamic Microsoft CRT
   (`/MD`, `/MDd`), Release `/O2` and IPO/LTO. Final Release binaries do not rely
   on the temporary `/Zi`/`/DEBUG` diagnostic configuration used during debugging.
@@ -76,7 +81,7 @@ the listed runs. Test processes suppress blocking Windows Error Reporting UI
 only; failing exit codes remain visible to CTest. No tests are disabled to make
 the final suite pass.
 
-## Release package
+## Original 1.2.0 release package
 
 The versioned staging directory is `dist/package-1.2.0`, archived as
 `dist/winamp-ogg-1.2.0-win32.zip`. Both input DLLs are byte-identical to the tested
@@ -102,6 +107,97 @@ SHA-256:
 ```text
 5a11d0d7d5d72f2811dc03144173a033ebed4322242b4efee48b5599799dfa77  Plugins/in_vorbis.dll
 59a5fc6248ba37f0a38b7138a76be90c684583a223a8dd7aee1aa172637d259e  Plugins/in_opus.dll
+```
+
+## Playlist refresh correction
+
+The playback loop previously sent bitrate, sample rate and channel count to
+Winamp's `SetInfo` callback every 250 ms, even when the displayed bitrate did not
+change. Supplying bitrate and sample rate together requests a title refresh in
+Winamp. Periodic updates now send only changed displayed kbps using
+`SetInfo(kbps, -1, -1, 1)`. Full-format updates are retained at playback startup
+and after an actual native output-format change; each reopen resets the cached
+displayed bitrate and the update timer. Real chained title notifications remain
+independent and enabled.
+
+The first standalone Release verification also encountered a stack exception
+inside the fixture encoder before DLL loading. Regenerating stale MSVC incremental
+LTO `.iobj`/`.ipdb` artifacts and relinking resolved the isolated network test.
+No decoder changes, increased test stack, disabled checks or network-test source
+changes were retained for that build-artifact issue.
+
+The new `ogg_notifications` test loads the actual DLL into an isolated host,
+paces output across several update intervals, and records every format/bitrate
+callback and title IPC. It checks Opus, Vorbis, changing-bitrate Opus chains,
+44.1-kHz six-channel to 48-kHz stereo Vorbis boundaries, and disabled instantaneous
+bitrate. Repeated format/title refreshes were reproduced before the fix. Existing
+shared codec fixture generators and network-test source remain unchanged.
+
+The original versioned package and archive remain the historical 1.2.0 baseline.
+The first periodic-update correction remains staged at
+`dist/package-1.2.0-playlist-fix`; those DLLs and their historical hashes are kept
+unchanged. The later seek correction uses the separate package recorded below.
+SHA-256 of the earlier periodic-update correction:
+
+```text
+7583b94754e9ab20bac0294ad8c4a5f1ae10ed37ae917ee89608b9b600d4e9ea  Plugins/in_vorbis.dll
+8905c41dcae2f8916a2fa1942a6c3495f7b1cadbbecaaccb91af32c4f4ab79ae  Plugins/in_opus.dll
+```
+
+Actual playlist appearance in an installed Winamp still needs a manual check.
+No installed DLL is replaced by these tests.
+
+## Seek notifications and playback work
+
+The earlier 250-ms fix was not enough: the Opus sibling still published a new
+metadata revision on every seek. In this Ogg plugin a link-number change or
+recording error also unconditionally requested a title refresh. The new DLL-level
+tests reproduced **three unwanted title IPCs** while seeking between links with
+unchanged tags. The community Winamp
+[`in_flac` seek path](https://github.com/manfromafar/winamp/blob/community/Src/Plugins/Input/in_flac/DecodeThread.cpp)
+was compared: it seeks/flushes without title IPC. A separate test reproduced Winamp's implicit title-refresh trigger
+when native rate/channel reopening resubmitted bitrate and sample rate together.
+
+The Ogg playback host now consumes Audio metadata revisions, copies the snapshot
+only on changes, and notifies the playlist only if the display title or actual
+tags differ. Album-only changes still notify Winamp for custom title formatting;
+link/format changes and recording errors alone do not. Native format notifications
+use `SetInfo(-1, rate, channels, 1)` and send a changed kbps separately, so even an
+actual output reopen does not implicitly request a title refresh.
+
+Same-link seek no longer invalidates parsed ReplayGain/R128. Visualization
+padding/conversion runs only for an installed callback. Pause and notified EOF
+wait on stop/control events; seek/resume/stop wake them without periodic output
+polling. Decoder validation, exact native history/preroll, real metadata updates,
+output draining and necessary format negotiation remain intact.
+
+Expanded `ogg_notifications` covers Opus and Vorbis repeated forward/backward
+seeks, coalesced seek bursts, identical tags, real title changes, album-only ATF
+changes, fixed output and native 44.1/48-kHz reopening, paused seek/resume,
+EOF seek/restart, no post-EOF polling and stop wakeup. Existing fixture generators,
+codec accuracy checks and network tests remain enabled.
+
+## Final seek-cleanup verification
+
+- Combined Winamp build: **30/30 Release** (105.75 s),
+  **30/30 Debug** (123.83 s).
+- Independent Ogg build: **15/15 Release** (43.77 s),
+  **15/15 Debug** (50.80 s).
+- Compiler logs have no C/C++ warnings/errors; dynamic-CRT, decoder, DLL,
+  resampler, surround, exact FLAC, radio, dialogs and notification checks pass.
+- On both DLL paths, repeated same-link seeks and identical-tag chains produce
+  **zero title IPCs**. Actual title and album-only tag changes still notify the
+  host. Native rate/channel reopening never combines a new rate with bitrate.
+- Pause/seek/resume, EOF seek/restart, no output polling after EOF and stop wakeup
+  pass. No installed Winamp was changed; real playlist appearance was not tested.
+
+The final package is `dist/package-1.2.0-seek-fix`. Previous packages and
+archives are retained. Both staged DLLs are byte-compared with this repository's
+final Release build. SHA-256 (build-specific; separate build trees may differ):
+
+```text
+3a248a2d675bad85ef571cf217150ec85673ed9abeffa38076b2f5454d8b60af  Plugins/in_opus.dll
+e52acf8062c7eb49381e4eeac05f9a37197047cfa66039b6455d5de7d667c6b0  Plugins/in_vorbis.dll
 ```
 
 ## Not verified / not performed

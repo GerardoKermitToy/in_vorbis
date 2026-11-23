@@ -16,6 +16,7 @@ public:
     bool Seek(int milliseconds);
     void Cancel() noexcept;
     const TrackInfo& Info() const noexcept { return info_; }
+    unsigned MetadataRevision() const noexcept { return metadata_revision_; }
     int Channels() const noexcept { return channels_; }
     int Rate() const noexcept { return rate_; }
     int SourceRate() const noexcept { return source_rate_; }
@@ -28,6 +29,7 @@ private:
     std::atomic<bool> cancelled_{false};
     std::unique_ptr<CodecReader> reader_;
     TrackInfo info_;
+    unsigned metadata_revision_ = 0;
     Settings settings_;
     bool shuffle_ = false, negotiate_ = false;
     int channels_ = 2, rate_ = 48000, source_rate_ = 48000, gain_link_ = -1;

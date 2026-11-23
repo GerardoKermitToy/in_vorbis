@@ -104,3 +104,23 @@ These are Ogg input extensions. They do not add native `.flac`, WebM or MP4 inpu
 change the sibling `in_opus` extension routing, or add Matroska Opus decoding.
 Actual output-plugin/hardware compatibility at 96 kHz and integration in an
 installed Winamp still require real-host validation.
+
+## Winamp status and playlist updates
+
+Instantaneous bitrate remains available without periodically requesting a title
+or playlist refresh. The plugin reports the complete output format when playback
+starts. A native chain with a different format reports rate/channels while
+preserving bitrate with `-1`; a changed displayed kbps is sent separately with
+rate/channels `-1`. Even a real output reopen therefore avoids the host's implicit
+title-refresh path. The cached displayed bitrate is retained across a seek and
+updated only when its value actually changes. Seeking within a link does not reparse ReplayGain/R128 or
+invalidate unchanged metadata. Link-number changes, output-format negotiation
+and recording errors do not themselves request a playlist refresh: title IPC is
+sent only when the display title or actual tags change, including fields used by
+Winamp title formatting. Identical-tag chains therefore remain quiet.
+
+Host snapshots are updated on metadata revisions rather than string comparisons
+for every PCM block. Visualization conversion is skipped when neither callback
+is present. Paused and already-notified EOF workers sleep on control/stop events;
+seek, resume and stop wake them. Output drain/backpressure and exact seek decoder
+history are retained. Disabling the bitrate display is not required.

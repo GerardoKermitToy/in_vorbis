@@ -22,7 +22,7 @@ namespace {
 winamp::InModule module{};
 std::unique_ptr<Audio> audio;
 std::unique_ptr<Pcm> pcm;
-HANDLE stop_event=nullptr,thread=nullptr;
+HANDLE stop_event=nullptr,control_event=nullptr,thread=nullptr;
 std::atomic<bool> output_open{false};bool vis_open=false;
 std::atomic<bool> paused{false};std::atomic<int> seek_ms{-1},decoded_ms{0},length_ms{-1};
 std::atomic<int> volume{-666},pan{0};
@@ -34,6 +34,9 @@ int active_channels=0,active_rate=0;
 struct Cache{std::wstring path;TrackInfo info;WIN32_FILE_ATTRIBUTE_DATA attributes{};bool valid=false;} cache;
 std::wstring staged_path;Tags staged_tags;
 void Copy(wchar_t* target,int size,const std::wstring& value){if(target&&size>0)wcsncpy_s(target,size,value.c_str(),_TRUNCATE);}
+int DisplayBitrate(int bitrate) noexcept {
+    return std::max(1,static_cast<int>((static_cast<std::int64_t>(bitrate)+500)/1000));
+}
 Settings GetSettings(){std::lock_guard<std::mutex> guard(lock);return configured;}
 TrackInfo GetInfo(const wchar_t* path){
     {std::lock_guard<std::mutex> guard(lock);if(!path||!*path||(active_channels&&!_wcsicmp(path,current_path.c_str())))return current;}
@@ -44,25 +47,39 @@ TrackInfo GetInfo(const wchar_t* path){
     {std::lock_guard<std::mutex> guard(lock);cache={path,info,a,valid};}return info;
 }
 bool Stopping(DWORD ms=0){return WaitForSingleObject(stop_event,ms)!=WAIT_TIMEOUT;}
+void WaitForControl(){const HANDLE events[]{stop_event,control_event};WaitForMultipleObjects(2,events,FALSE,INFINITE);}
 unsigned Run(){
     const int bytes=active.bits/8;
     std::array<std::uint32_t,BlockFrames*MaxChannels*2> storage{};
     std::array<short,BlockFrames*MaxChannels> visual{};
     auto* data=reinterpret_cast<unsigned char*>(storage.data());auto* out=module.outMod;
-    int pending=0,offset=0,end_ms=0,link=audio->Info().current_link,retries=0;
+    int pending=0,offset=0,end_ms=0,retries=0;
     bool eof=false,notified=false;auto bitrate_at=GetTickCount64()+250;
-    std::wstring previous_title=audio->Info().title,recording_error=audio->Info().station.recording_error;
+    int displayed_bitrate=DisplayBitrate(audio->Info().current.bitrate);
+    auto revision=audio->MetadataRevision();
+    auto publish_metadata=[&]{
+        if(revision==audio->MetadataRevision())return;
+        revision=audio->MetadataRevision();const auto& info=audio->Info();bool title_changed;
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            title_changed=current.title!=info.title||current.current.tags!=info.current.tags;
+            current=info;
+        }
+        const int length=info.radio?-1:info.duration_ms;
+        if(length_ms.load()!=length)length_ms=length;
+        if(title_changed&&module.hMainWindow)PostMessageW(module.hMainWindow,WM_USER,0,243);
+    };
     while(!Stopping()){
         const int channels=pcm->Channels(),rate=pcm->Rate(),frame_bytes=bytes*channels;
         int request=seek_ms.exchange(-1);
         if(request>=0&&output_open&&audio->Seek(request)){pcm->Reset(request);pending=offset=0;eof=notified=false;out->Flush(request);decoded_ms=request;}
-        if(paused){Stopping(10);continue;}
+        if(paused){WaitForControl();continue;}
         if(pending){int n=std::min({pending,out->CanWrite(),8192});n-=n%frame_bytes;
             if(n>0&&!out->Write(reinterpret_cast<char*>(data)+offset,n)){pending-=n;offset+=n;if(!pending)decoded_ms=end_ms;}else Stopping(5);continue;}
-        if(eof){if(output_open){out->CanWrite();if(!notified&&!out->IsPlaying()){if(module.hMainWindow)PostMessageW(module.hMainWindow,winamp::kEndOfFile,0,0);notified=true;}}else if(!notified){if(module.hMainWindow)PostMessageW(module.hMainWindow,winamp::kEndOfFile,0,0);notified=true;}Stopping(10);continue;}
+        if(eof){if(notified){WaitForControl();continue;}if(output_open){out->CanWrite();if(!notified&&!out->IsPlaying()){if(module.hMainWindow)PostMessageW(module.hMainWindow,winamp::kEndOfFile,0,0);notified=true;}}else if(!notified){if(module.hMainWindow)PostMessageW(module.hMainWindow,winamp::kEndOfFile,0,0);notified=true;}Stopping(10);continue;}
         if(out->CanWrite()<frame_bytes){Stopping(5);continue;}
         int n=pcm->Read(data,BlockFrames);
-        length_ms=audio->Info().radio?-1:audio->Info().duration_ms;
+        publish_metadata();
         if(n==Pcm::FormatChange){
             // Drain before closing. A pending seek supersedes the boundary.
             while(!Stopping()&&seek_ms.load()<0){out->CanWrite();if(!out->IsPlaying())break;Stopping(5);}
@@ -84,8 +101,14 @@ unsigned Run(){
             if(vis_open){if(module.SAVSADeInit)module.SAVSADeInit();vis_open=false;}
             if(module.SAVSAInit){module.SAVSAInit(latency,new_rate);vis_open=true;}
             if(module.VSASetInfo)module.VSASetInfo(new_rate,new_channels);
-            if(module.SetInfo)module.SetInfo(std::max(1,(audio->Info().current.bitrate+500)/1000),new_rate/1000,new_channels,1);
-            {std::lock_guard<std::mutex> guard(lock);active_channels=new_channels;active_rate=new_rate;current=audio->Info();}
+            // A bitrate and rate in the same callback requests a playlist
+            // title refresh in Winamp, even when only the output format changed.
+            if(module.SetInfo)module.SetInfo(-1,new_rate/1000,new_channels,1);
+            const int bitrate=DisplayBitrate(audio->Info().current.bitrate);
+            if(bitrate!=displayed_bitrate&&module.SetInfo)module.SetInfo(bitrate,-1,-1,1);
+            displayed_bitrate=bitrate;
+            bitrate_at=GetTickCount64()+250;
+            {std::lock_guard<std::mutex> guard(lock);active_channels=new_channels;active_rate=new_rate;}
             continue;
         }
         if(n<=0){
@@ -100,25 +123,35 @@ unsigned Run(){
             if(n<0&&!Stopping()){std::lock_guard<std::mutex> guard(lock);last_error=audio->Error().empty()?L"The audio stream could not be decoded.":audio->Error();}eof=true;continue;
         }
         retries=0;
-        memset(data+n*frame_bytes,active.bits==8?128:0,(BlockFrames-n)*frame_bytes);
-        void* visuals=data;
-        if(active.bits!=16){for(int i=0;i<BlockFrames*channels;++i){auto* p=data+i*bytes;visual[i]=active.bits==8?static_cast<short>((int(*p)-128)*256):static_cast<short>(p[bytes-2]|(p[bytes-1]<<8));}visuals=visual.data();}
-        if(module.SAAddPCMData)module.SAAddPCMData(visuals,channels,16,decoded_ms);
-        if(module.VSAAddPCMData)module.VSAAddPCMData(visuals,channels,16,decoded_ms);
+        if(module.SAAddPCMData||module.VSAAddPCMData){
+            memset(data+n*frame_bytes,active.bits==8?128:0,(BlockFrames-n)*frame_bytes);
+            void* visuals=data;
+            if(active.bits!=16){for(int i=0;i<BlockFrames*channels;++i){auto* p=data+i*bytes;visual[i]=active.bits==8?static_cast<short>((int(*p)-128)*256):static_cast<short>(p[bytes-2]|(p[bytes-1]<<8));}visuals=visual.data();}
+            if(module.SAAddPCMData)module.SAAddPCMData(visuals,channels,16,decoded_ms);
+            if(module.VSAAddPCMData)module.VSAAddPCMData(visuals,channels,16,decoded_ms);
+        }
         int made=n;if(module.dsp_isactive&&module.dsp_dosamples&&module.dsp_isactive())made=module.dsp_dosamples(reinterpret_cast<short*>(data),n,active.bits,channels,rate);
         if(made<0||made>n*2){eof=true;continue;}pending=made*frame_bytes;offset=0;end_ms=pcm->PositionMs();if(!pending)decoded_ms=end_ms;
-        const auto& info=audio->Info();
-        if(info.current_link!=link||info.title!=previous_title||info.station.recording_error!=recording_error){
-            {std::lock_guard<std::mutex> guard(lock);current=info;}
-            link=info.current_link;previous_title=info.title;recording_error=info.station.recording_error;if(module.hMainWindow)PostMessageW(module.hMainWindow,WM_USER,0,243);
+        if(active.instant_bitrate&&GetTickCount64()>=bitrate_at){
+            const int br=audio->InstantBitrate();
+            if(br>0&&module.SetInfo){
+                const int kbps=DisplayBitrate(br);
+                if(kbps!=displayed_bitrate){
+                    // Sending bitrate together with sample rate requests a
+                    // Winamp title refresh. Keep format changes separate;
+                    // -1 preserves the existing sample rate and channel count.
+                    module.SetInfo(kbps,-1,-1,1);displayed_bitrate=kbps;
+                }
+            }
+            bitrate_at=GetTickCount64()+250;
         }
-        if(active.instant_bitrate&&GetTickCount64()>=bitrate_at){int br=audio->InstantBitrate();if(br>0&&module.SetInfo)module.SetInfo((br+500)/1000,rate/1000,channels,1);bitrate_at=GetTickCount64()+250;}
     }return 0;
 }
 unsigned __stdcall Worker(void*)noexcept{try{return Run();}catch(...){if(module.hMainWindow)PostMessageW(module.hMainWindow,winamp::kEndOfFile,0,0);return 1;}}
 void __cdecl Stop(){
     if(thread){SetEvent(stop_event);if(audio)audio->Cancel();WaitForSingleObject(thread,INFINITE);CloseHandle(thread);thread=nullptr;}
     if(stop_event){CloseHandle(stop_event);stop_event=nullptr;}
+    if(control_event){CloseHandle(control_event);control_event=nullptr;}
     if(output_open){module.outMod->Close();output_open=false;}if(vis_open){if(module.SAVSADeInit)module.SAVSADeInit();vis_open=false;}
     pcm.reset();audio.reset();paused=false;seek_ms=-1;decoded_ms=0;length_ms=-1;module.is_seekable=1;
     {std::lock_guard<std::mutex> guard(lock);active_channels=active_rate=0;current_path.clear();}
@@ -131,11 +164,11 @@ int __cdecl Play(const wchar_t* path){Stop();try{
     int latency=out->Open(next->Rate(),next->Channels(),settings.bits,0,0);
     if(latency<0&&next->Channels()!=2){settings.channels=ChannelMode::Stereo;if(!next->Open(path,settings,shuffle,error,true))return 1;latency=out->Open(next->Rate(),2,settings.bits,0,0);}
     if(latency<0)return 1;output_open=true;audio=std::move(next);active=settings;pcm=std::make_unique<Pcm>(*audio,settings);if(!pcm->Ready()){Stop();return 1;}
-    stop_event=CreateEventW(nullptr,TRUE,FALSE,nullptr);if(!stop_event){Stop();return 1;}
+    stop_event=CreateEventW(nullptr,TRUE,FALSE,nullptr);control_event=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!stop_event||!control_event){Stop();return 1;}
     {std::lock_guard<std::mutex> guard(lock);current=audio->Info();current_path=path;active_channels=audio->Channels();active_rate=audio->Rate();last_error.clear();}
     module.is_seekable=audio->Info().seekable?1:0;length_ms=audio->Info().duration_ms;
     if(module.SAVSAInit){module.SAVSAInit(latency,audio->Rate());vis_open=true;}if(module.VSASetInfo)module.VSASetInfo(audio->Rate(),audio->Channels());
-    if(module.SetInfo)module.SetInfo(std::max(1,(audio->Info().current.bitrate+500)/1000),audio->Rate()/1000,audio->Channels(),1);
+    if(module.SetInfo)module.SetInfo(DisplayBitrate(audio->Info().current.bitrate),audio->Rate()/1000,audio->Channels(),1);
     if(out->SetVolume)out->SetVolume(volume);if(out->SetPan)out->SetPan(pan);
     thread=reinterpret_cast<HANDLE>(_beginthreadex(nullptr,0,Worker,nullptr,0,nullptr));if(!thread){Stop();return 1;}return 0;
 }catch(...){Stop();return 1;}}
@@ -157,12 +190,12 @@ void __cdecl Init(){
     InitializeLanguage(module.hMainWindow,module.hDllInstance);
 }
 void __cdecl Quit(){Stop();ShutdownLanguage();UnregisterMatroska();}
-void __cdecl Pause(){paused=true;std::lock_guard<std::mutex> guard(output_lock);if(output_open)module.outMod->Pause(1);}
-void __cdecl Unpause(){std::lock_guard<std::mutex> guard(output_lock);if(output_open)module.outMod->Pause(0);paused=false;}
+void __cdecl Pause(){paused=true;{std::lock_guard<std::mutex> guard(output_lock);if(output_open)module.outMod->Pause(1);}if(control_event)SetEvent(control_event);}
+void __cdecl Unpause(){{std::lock_guard<std::mutex> guard(output_lock);if(output_open)module.outMod->Pause(0);}paused=false;if(control_event)SetEvent(control_event);}
 int __cdecl Paused(){return paused?1:0;}
 int __cdecl Length(){return length_ms;}
 int __cdecl Time(){std::lock_guard<std::mutex> guard(output_lock);if(!output_open)return 0;auto n=static_cast<std::int64_t>(decoded_ms)+module.outMod->GetOutputTime()-module.outMod->GetWrittenTime();return static_cast<int>(std::clamp<std::int64_t>(n,0,length_ms>=0?length_ms.load():INT_MAX));}
-void __cdecl Seek(int ms){if(output_open&&module.is_seekable)seek_ms=std::clamp(ms,0,length_ms>=0?length_ms.load():INT_MAX);}
+void __cdecl Seek(int ms){if(output_open&&module.is_seekable){seek_ms=std::clamp(ms,0,length_ms>=0?length_ms.load():INT_MAX);if(control_event)SetEvent(control_event);}}
 void __cdecl Volume(int v){volume=v;std::lock_guard<std::mutex> guard(output_lock);if(output_open&&module.outMod->SetVolume)module.outMod->SetVolume(v);}
 void __cdecl Pan(int v){pan=v;std::lock_guard<std::mutex> guard(output_lock);if(output_open&&module.outMod->SetPan)module.outMod->SetPan(v);}
 void __cdecl Eq(int,char[10],int){}
