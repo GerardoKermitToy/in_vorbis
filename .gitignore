@@ -1,0 +1,9 @@
+/build/
+/dist/
+/third_party/downloads/
+/third_party/source/
+/.vs/
+/.claude/
+/CMakeUserPresets.json
+*.user
+*.suo

@@ -1,0 +1,16 @@
+LIBRARY in_vorbis
+EXPORTS
+    winampGetInModule2
+    winampGetExtendedFileInfoW
+    winampGetExtendedFileInfo
+    winampSetExtendedFileInfoW
+    winampSetExtendedFileInfo
+    winampWriteExtendedFileInfo
+    winampUseUnifiedFileInfoDlg
+    winampAddUnifiedFileInfoPane
+    winampGetExtendedRead_open
+    winampGetExtendedRead_openW
+    winampGetExtendedRead_openW_float
+    winampGetExtendedRead_getData
+    winampGetExtendedRead_setTime
+    winampGetExtendedRead_close
