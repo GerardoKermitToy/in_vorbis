@@ -38,6 +38,13 @@ add_dependencies(ogg_dialog_tests in_vorbis)
 add_test(NAME ogg_dialogs COMMAND ogg_dialog_tests "$<TARGET_FILE:in_vorbis>" "${CMAKE_CURRENT_BINARY_DIR}/dialog-data")
 set_tests_properties(ogg_dialogs PROPERTIES TIMEOUT 30)
 
+add_executable(ogg_tag_editor_tests tag_editor_tests.cpp)
+target_link_libraries(ogg_tag_editor_tests PRIVATE ogg_test_fixtures user32 gdi32 advapi32 comctl32)
+target_compile_options(ogg_tag_editor_tests PRIVATE /W4 /permissive- /utf-8)
+add_dependencies(ogg_tag_editor_tests in_vorbis)
+add_test(NAME ogg_tag_editor COMMAND ogg_tag_editor_tests "$<TARGET_FILE:in_vorbis>" "${CMAKE_CURRENT_BINARY_DIR}/tag-editor-data")
+set_tests_properties(ogg_tag_editor PROPERTIES TIMEOUT 60)
+
 add_executable(ogg_stream_tests network_tests.cpp)
 target_compile_definitions(ogg_stream_tests PRIVATE OGG_STREAM_ONLY)
 target_link_libraries(ogg_stream_tests PRIVATE ogg_test_fixtures ws2_32)

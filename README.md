@@ -14,8 +14,13 @@ A **GPL-3.0-only** input plugin for **32-bit Winamp**.
 - HTTP/HTTPS streaming with ICY titles, proxy/authentication settings, optional
   recording and bounded reconnect. Live radio is not seekable; finite HTTP files
   require server support for validated byte ranges.
-- Local Vorbis/Opus tag editing without reencoding audio. Other comments and
-  embedded artwork are preserved; artwork editing is not supported.
+- Local Vorbis/Opus tag editing in Winamp's **File Info → Basic Info / Advanced**
+  dialog, without reencoding audio. Advanced provides Name/Value editing,
+  Add New, Delete and Delete All; OK saves and Cancel discards drafts. Repeated
+  fields, multiline values, other comments and embedded artwork are preserved;
+  artwork editing by this plugin is not supported. All standard Basic Info
+  fields remain editable when unset. Format Info retains the historical
+  technical-data layout, adds known codec details and supports scrolling.
 - Integer and IEEE-float extended-read PCM APIs with seeking and cancellation.
 - Optional Opus HD/QEXT, OSCE/BWE and Ambisonics rendering; exact integer FLAC
   output under the conditions described in [advanced decoding](docs/ADVANCED_DECODING.md).

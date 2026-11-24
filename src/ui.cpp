@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "ui.hpp"
 #include "tag_writer.hpp"
+#include "tag_editor.hpp"
 #include "resource.h"
 #include "language.hpp"
 
@@ -23,8 +24,6 @@
 
 namespace ogg_input {
 namespace {
-
-constexpr wchar_t kNoWriteInfoProperty[] = L"INBUILT_NOWRITEINFO";
 
 int UiMessageBox(HWND owner, const wchar_t* text, const wchar_t* caption, UINT flags) {
     return MessageBoxW(owner, Localized(text).c_str(), Localized(caption).c_str(), flags);
@@ -374,7 +373,7 @@ void RenderInfo(HWND dialog, InfoContext& context) {
     SetControlText(dialog, IDC_TAG_NAME, {});
     SetControlText(dialog, IDC_TAG_VALUE, {});
     PopulateOtherTags(dialog, context);
-    SetControlText(dialog, IDC_INFO_DETAILS, FormatInfo(context.track));
+    SetControlText(dialog, IDC_INFO_DETAILS, FormatInfo(context.track, Localized));
     SetControlText(dialog, IDC_INFO_WRITABLE_REASON, context.writableReason);
     SetControlText(dialog, IDC_INFO_STATUS, context.status);
 
@@ -987,47 +986,6 @@ INT_PTR CALLBACK AboutDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARA
     return FALSE;
 }
 
-struct UnifiedContext {
-    UnifiedContext(HINSTANCE moduleInstance, HWND owner, const TrackInfo& input)
-        : module(moduleInstance), parent(owner), track(input) {}
-
-    HINSTANCE module = nullptr;
-    HWND parent = nullptr;
-    TrackInfo track;
-};
-
-INT_PTR CALLBACK UnifiedDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam) {
-    auto* context = reinterpret_cast<UnifiedContext*>(GetWindowLongPtrW(dialog, DWLP_USER));
-    switch (message) {
-    case WM_INITDIALOG:
-        LocalizeDialog(dialog);
-        context = reinterpret_cast<UnifiedContext*>(lParam);
-        SetWindowLongPtrW(dialog, DWLP_USER, reinterpret_cast<LONG_PTR>(context));
-        // Winamp has no matching service flag in the local ABI. This property is
-        // an explicit, discoverable marker for hosts/tests and accompanies a UI
-        // with no writable metadata controls or setter behavior.
-        SetPropW(dialog, kNoWriteInfoProperty, reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(1)));
-        SetControlText(dialog, IDC_UNIFIED_SUMMARY,
-                       Localized(L"Read-only metadata. Use File Information to edit supported local files."));
-        SetControlText(dialog, IDC_UNIFIED_DETAILS, FormatInfo(context->track));
-        return TRUE;
-
-    case WM_COMMAND:
-        if (context && LOWORD(wParam) == IDC_UNIFIED_OPEN_INFO && HIWORD(wParam) == BN_CLICKED) {
-            ShowInfo(context->module, context->parent ? context->parent : GetParent(dialog), context->track);
-            return TRUE;
-        }
-        break;
-
-    case WM_NCDESTROY:
-        RemovePropW(dialog, kNoWriteInfoProperty);
-        SetWindowLongPtrW(dialog, DWLP_USER, 0);
-        delete context;
-        return FALSE;
-    }
-    return FALSE;
-}
-
 } // namespace
 
 Settings Configure(HINSTANCE module, HWND parent, Settings current, const std::wstring& status) {
@@ -1045,14 +1003,8 @@ void ShowInfo(HINSTANCE module, HWND parent, const TrackInfo& info) {
                     reinterpret_cast<LPARAM>(&context));
 }
 
-HWND UnifiedPane(HINSTANCE module, HWND parent, const TrackInfo& info) {
-    InitializeCommonControls();
-    auto* context = new (std::nothrow) UnifiedContext(module, parent, info);
-    if (!context) return nullptr;
-    HWND pane = CreateDialogParamW(module, MAKEINTRESOURCEW(IDD_UNIFIED_PANE), parent,
-                                   UnifiedDialogProc, reinterpret_cast<LPARAM>(context));
-    if (!pane) delete context;
-    return pane;
+HWND UnifiedPane(HINSTANCE module, HWND parent, const TrackInfo& info, void (*saved)()) {
+    return CreateTagEditorPane(module, parent, info, saved);
 }
 
 void ShowAbout(HINSTANCE module, HWND parent) {

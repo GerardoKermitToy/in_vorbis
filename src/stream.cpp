@@ -44,6 +44,7 @@ bool ByteStream::Open(const wchar_t* path,const Settings& raw,std::wstring& erro
         if(!file_&&wcschr(path,L'|')){std::wstring fixed(path);std::replace(fixed.begin(),fixed.end(),L'|',L'｜');file_=open_file(fixed.c_str());}
         if(!file_){error=L"Cannot open the audio file for reading.";return false;}
         if(_fseeki64(file_,0,SEEK_END)|| (size_=_ftelli64(file_))<0 || _fseeki64(file_,0,SEEK_SET)){error=L"Cannot determine the file size.";return false;}
+        source_size_=size_;
         // Some historical Ogg files wrap the bitstream in a RIFF/WAVE data chunk.
         unsigned char header[12]{};if(fread(header,1,12,file_)==12&&!memcmp(header,"RIFF",4)&&!memcmp(header+8,"WAVE",4)){
             const auto physical=size_;std::int64_t at=12;bool found=false;
@@ -100,6 +101,7 @@ bool ByteStream::Open(const wchar_t* path,const Settings& raw,std::wstring& erro
     icy_interval_=icy_left_=static_cast<int>(interval);deadline_=GetTickCount64()+15000;
     auto length=Header(L"Content-Length");wchar_t* length_end=nullptr;
     if(!length.empty()){auto value=_wcstoui64(length.c_str(),&length_end,10);if(length_end&&!*length_end&&value<=INT64_MAX)size_=static_cast<std::int64_t>(value);}
+    source_size_=size_;
     http_seekable_=s.http_seek&&size_>=0&&!icy_interval_&&!_wcsicmp(Header(L"Accept-Ranges").c_str(),L"bytes");
     network_buffer_.resize(static_cast<std::size_t>(s.stream_buffer_kb)*1024);
     if(s.prebuffer_kb>0){int wanted=s.prebuffer_kb*1024;while(network_used_<wanted){int got=NetworkRead(network_buffer_.data()+network_used_,wanted-network_used_);if(got<0){error=L"Cannot prebuffer the radio stream.";return false;}if(!got)break;network_used_+=got;}}

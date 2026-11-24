@@ -199,40 +199,17 @@ void __cdecl Seek(int ms){if(output_open&&module.is_seekable){seek_ms=std::clamp
 void __cdecl Volume(int v){volume=v;std::lock_guard<std::mutex> guard(output_lock);if(output_open&&module.outMod->SetVolume)module.outMod->SetVolume(v);}
 void __cdecl Pan(int v){pan=v;std::lock_guard<std::mutex> guard(output_lock);if(output_open&&module.outMod->SetPan)module.outMod->SetPan(v);}
 void __cdecl Eq(int,char[10],int){}
-bool ParseGain(const wchar_t* input,double& db){
-    auto text=ToUtf8(input);auto first=text.data();const auto end=first+text.size();
-    while(first!=end&&(*first==' '||*first=='\t'))++first;
-    if(first!=end&&*first=='+')++first;
-    const auto parsed=std::from_chars(first,end,db);
-    if(parsed.ec!=std::errc{}||!std::isfinite(db))return false;
-    auto tail=parsed.ptr;while(tail!=end&&(*tail==' '||*tail=='\t'))++tail;
-    if(end-tail>=2&&(tail[0]=='d'||tail[0]=='D')&&(tail[1]=='b'||tail[1]=='B'))tail+=2;
-    while(tail!=end&&(*tail==' '||*tail=='\t'))++tail;
-    return tail==end;
-}
 std::wstring Ansi(const char* s){if(!s)return{};int n=MultiByteToWideChar(CP_ACP,0,s,-1,nullptr,0);if(n<=0)return{};std::wstring v(n,0);MultiByteToWideChar(CP_ACP,0,s,-1,v.data(),n);v.pop_back();return v;}
 }
 extern "C" winamp::InModule* __cdecl winampGetInModule2(){static bool ready=[](){static char description[]="Independent Ogg Input 1.2.1 (Vorbis/Opus/FLAC/Speex, x86)";static char extensions[]="ogg;oga;spx\0Ogg Audio (*.ogg;*.oga;*.spx)\0";
     module.version=winamp::kInputVersion;module.description=description;module.FileExtensions=extensions;module.is_seekable=1;module.UsesOutputPlug=1;
     module.Init=Init;module.Quit=Quit;module.Config=Config;module.About=About;module.GetFileInfo=GetFileInfo;module.InfoBox=InfoBox;module.IsOurFile=IsOurFile;module.Play=Play;module.Stop=Stop;module.Pause=Pause;module.UnPause=Unpause;module.IsPaused=Paused;module.GetLength=Length;module.GetOutputTime=Time;module.SetOutputTime=Seek;module.SetVolume=Volume;module.SetPan=Pan;module.EQSet=Eq;return true;}();(void)ready;return &module;}
-extern "C" int __cdecl winampGetExtendedFileInfoW(const wchar_t* path,const char* key,wchar_t* result,int capacity){if(!result||capacity<1||!key)return 0;result[0]=0;try{if((!path||!*path)&&!strcmp(key,"type")){Copy(result,capacity,L"0");return 1;}auto i=GetInfo(path);if(i.codec==Codec::Unknown)return 0;std::wstring value;if(!Metadata(i,key,value))return 0;Copy(result,capacity,value);return 1;}catch(...){return 0;}}
+extern "C" int __cdecl winampGetExtendedFileInfoW(const wchar_t* path,const char* key,wchar_t* result,int capacity){if(!result||capacity<1||!key)return 0;result[0]=0;try{if((!path||!*path)&&!strcmp(key,"type")){Copy(result,capacity,L"0");return 1;}auto i=GetInfo(path);if(i.codec==Codec::Unknown)return 0;std::wstring value;if(!Metadata(i,key,value,Localized))return 0;Copy(result,capacity,value);return 1;}catch(...){return 0;}}
 extern "C" int __cdecl winampGetExtendedFileInfo(const char* path,const char* key,char* result,int capacity){if(!result||capacity<1)return 0;result[0]=0;try{auto wide=Ansi(path);wchar_t value[32768]{};if(!winampGetExtendedFileInfoW(wide.c_str(),key,value,32768))return 0;int n=WideCharToMultiByte(CP_ACP,0,value,-1,nullptr,0,nullptr,nullptr);std::string text(n,0);WideCharToMultiByte(CP_ACP,0,value,-1,text.data(),n,nullptr,nullptr);strncpy_s(result,capacity,text.c_str(),_TRUNCATE);return 1;}catch(...){return 0;}}
-extern "C" int __cdecl winampSetExtendedFileInfoW(const wchar_t* path,const char* key,const wchar_t* value){if(!path||!*path||!key||!value||IsHttp(path))return 0;try{auto info=GetInfo(path);if(info.codec!=Codec::Vorbis&&info.codec!=Codec::Opus)return 0;std::string name(key);if(name=="year")name="date";if(name=="track")name="tracknumber";if(name=="disc")name="discnumber";for(char& c:name){if(c<32||c>125||c=='=')return 0;c=static_cast<char>(tolower(static_cast<unsigned char>(c)));}if(name.empty()||name.size()>128||wcslen(value)>65536)return 0;
-    std::wstring stored_value=value;if(name=="rating"&&*value){wchar_t* end=nullptr;long rating=wcstol(value,&end,10);if(!end||*end||rating<0||rating>5)return 0;stored_value=std::to_wstring(rating*20);}
-    std::string obsolete_gain;
-    if(info.codec==Codec::Opus&&(name=="replaygain_track_gain"||name=="replaygain_album_gain")){
-        obsolete_gain=name;name=name=="replaygain_album_gain"?"r128_album_gain":"r128_track_gain";
-        if(*value){double db=0;if(!ParseGain(value,db))return 0;
-            const double q8=db*256.-info.current.header_gain_q8-5*256.;
-            if(!std::isfinite(q8)||q8<-32768||q8>32767)return 0;
-            stored_value=std::to_wstring(static_cast<int>(std::lround(q8)));
-        }
-    }
-    for(const auto* technical:{"length","bitrate","channels","samplerate","type","lossless","family","formatinformation","mime","rateable","serial","gain"})if(name==technical)return 0;
+extern "C" int __cdecl winampSetExtendedFileInfoW(const wchar_t* path,const char* key,const wchar_t* value){if(!path||!*path||IsHttp(path))return 0;try{Tags patch;if(!MetadataPatch(GetInfo(path),key,value,patch))return 0;
     std::lock_guard<std::mutex> guard(lock);if(staged_path!=path){staged_path=path;staged_tags.clear();}
-    if(!obsolete_gain.empty())staged_tags[obsolete_gain]=L"";
-    staged_tags[name]=std::move(stored_value);return 1;}catch(...){return 0;}}
+    for(auto& tag:patch)staged_tags[tag.first]=std::move(tag.second);return 1;}catch(...){return 0;}}
 extern "C" int __cdecl winampSetExtendedFileInfo(const char* path,const char* key,const char* value){try{auto p=Ansi(path),v=Ansi(value);return winampSetExtendedFileInfoW(p.c_str(),key,v.c_str());}catch(...){return 0;}}
 extern "C" int __cdecl winampWriteExtendedFileInfo(){try{std::wstring path;Tags tags;{std::lock_guard<std::mutex> guard(lock);path=staged_path;tags=staged_tags;}if(path.empty())return 0;std::wstring error;if(!WriteTags(path.c_str(),-1,tags,error))return 0;{std::lock_guard<std::mutex> guard(lock);staged_path.clear();staged_tags.clear();cache={};}return 1;}catch(...){return 0;}}
 extern "C" int __cdecl winampUseUnifiedFileInfoDlg(const wchar_t* path){try{return path&&*path&&!IsHttp(path)&&GetSettings().unified_info&&GetInfo(path).codec!=Codec::Unknown;}catch(...){return 0;}}
-extern "C" HWND __cdecl winampAddUnifiedFileInfoPane(int index,const wchar_t* path,HWND parent,wchar_t* name,int capacity){if(index||!path||!parent||capacity<1)return nullptr;try{Copy(name,capacity,Localized(L"Ogg audio"));return UnifiedPane(module.hDllInstance,parent,GetInfo(path));}catch(...){return nullptr;}}
+extern "C" HWND __cdecl winampAddUnifiedFileInfoPane(int index,const wchar_t* path,HWND parent,wchar_t* name,int capacity){if(index||!path||!parent||capacity<1)return nullptr;try{Copy(name,capacity,Localized(L"Advanced"));return UnifiedPane(module.hDllInstance,parent,GetInfo(path),[]{std::lock_guard<std::mutex> guard(lock);cache={};});}catch(...){return nullptr;}}

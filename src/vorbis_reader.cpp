@@ -74,6 +74,10 @@ class VorbisReader final : public CodecReader {
         if (!format) return link;
         link.rate = format->rate;
         link.channels = format->channels;
+        link.format_version = format->version;
+        link.nominal_bitrate = std::max(0L, format->bitrate_nominal);
+        link.minimum_bitrate = std::max(0L, format->bitrate_lower);
+        link.maximum_bitrate = std::max(0L, format->bitrate_upper);
         link.bitrate = std::max(0L, ov_bitrate(&file_, index));
         link.serial = static_cast<std::uint32_t>(ov_serialnumber(&file_, index));
         const auto frames = ov_pcm_total(&file_, index);

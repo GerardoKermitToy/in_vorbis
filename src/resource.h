@@ -29,6 +29,8 @@
 #define IDC_INFO_SAVE                    1019
 #define IDC_INFO_CLOSE                   1020
 #define IDC_INFO_STATUS                  1021
+#define IDC_TAG_ADD_NEW                  1022
+#define IDC_TAG_DELETE_ALL               1023
 #define IDC_SAVE                         IDC_INFO_SAVE
 
 // Configuration dialog and tab control.
@@ -104,7 +106,7 @@
 #define IDC_CONFIG_OK                     IDOK
 #define IDC_CONFIG_CANCEL                 IDCANCEL
 
-// Read-only unified information child.
+// Winamp unified Advanced child (the host owns the tabs and OK/Cancel).
 #define IDC_UNIFIED_SUMMARY              1200
 #define IDC_UNIFIED_DETAILS              1201
 #define IDC_UNIFIED_OPEN_INFO            1202

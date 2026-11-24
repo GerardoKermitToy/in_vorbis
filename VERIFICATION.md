@@ -319,6 +319,107 @@ aef1d68888e77ecc9682cd08605d62e443ff5afdbde7a134d29c79a30954582e  Plugins/in_vor
 No installed Winamp DLL was replaced. Actual player skin rendering was not
 verified; these status values were captured through the real DLL in mock hosts.
 
+## 2026-11-24 — Unified Winamp tag editor
+
+The default local File Info integration now contributes one editable Advanced
+pane to Winamp's own Basic Info / Artwork / Advanced window. The plugin does not
+recreate the host's path, standard fields, tab strip, OK/Cancel or artwork UI.
+The independently authored Advanced resource contains a Name/Value list, Name
+entry, multiline Value entry and Add New / Delete / Delete All buttons. A native
+child-window capture from the mock host was visually inspected; this is not a
+claim that an installed Winamp skin was tested.
+
+A separate ordered comment document preserves repeated field names, empty
+values and long/multiline Unicode text. The tests include a 200-character field
+name and a 70000-character value, independent editing of repeated PERFORMER
+entries, rename and keyboard deletion. Host WM_USER broadcasts synchronize
+Basic Info and Advanced without recursive echoes. OK commits and repeated OK
+without changes is a byte-exact no-op; Cancel discards drafts, including Delete
+All. Tests verify parent INBUILT_NOWRITEINFO ownership/restoration, metadata-cache
+invalidation, native Opus R128/host ReplayGain and rating conversion, untouched
+chained links, opaque/artwork bytes and bit-exact decoded audio.
+
+The initial test harness attempted to auto-dismiss deliberately triggered error
+dialogs and could interrupt the desktop. Those UI failure paths were removed
+from the unattended test: stale snapshots and invalid field names are now
+checked directly through WriteTagDocument. The mock host stays hidden by default;
+a thread-local creation hook blocks unexpected top-level dialogs and treats them
+as failures. Visible capture is opt-in through OGG_TEST_CAPTURE_UI.
+
+Final Win32/MSVC verification passed **16/16 Release** (60.19 s) and **16/16 Debug**
+(79.10 s). The new ogg_tag_editor test passed in 3.31 s and 3.33 s respectively,
+without modal dialogs or user interaction. The complete runs include notification,
+network, language, dynamic-CRT, exact-FLAC and advanced-Opus regressions. Final
+C/C++ build logs contain no compiler warnings/errors, and git diff --check passes.
+
+The Release DLL is PE32/x86 and is staged at dist/Plugins/in_vorbis.dll. Its bytes
+match the build output; the staged DLL also passed the noninteractive editor
+regression directly. FileVersion/ProductVersion remain 1.2.1. The new staging
+SHA-256 supersedes the preceding entry:
+
+```text
+346bd74b3e8d196ed4689e748cd3740a4f85257aad7d358721d2b00e2d6df2f1  Plugins/in_vorbis.dll
+```
+
+No installed Winamp DLL was replaced. Actual installed-host rendering, host
+artwork editing and full historical editor parity are not claimed. Existing
+Vorbis/Opus writer validation and unsupported-format boundaries remain in place.
+
+## 2026-11-24 — Basic Info field support and original technical layout
+
+The earlier Advanced-only checks missed a real-host ABI error: an absent text
+tag returned failure from the extended metadata getter, which Winamp interprets
+as an unsupported field and disables in Basic Info. A new regression reproduced
+this first at the empty Track # field before the fix. Supported-but-unset fields
+now return success with an empty value. All twelve standard fields are checked
+when empty, after creation, after edits in both directions and after deletion.
+Empty primary tags also retain historical alias fallbacks.
+
+Format Info now starts with the original Length, Average bitrate, File size,
+Channels, Sampling rate, Serial number, Version and separate Vendor lines.
+The supplied 415902-byte / 30-second example is asserted as **110 kbps**, not
+106-kbps audio-only bitrate. Native sample counts avoid millisecond truncation;
+file sizes remain 64-bit and include RIFF wrappers. Actual Vorbis header version
+and nominal/minimum/maximum bitrates are retained separately from decoded audio
+bitrate. Useful additional facts include codec, millisecond duration, PCM sample
+count, actual lossless bit depth, chain position, Opus header gain and available
+decoder details. Missing facts are omitted; lossy source PCM depth is not guessed.
+Technical labels have independent append-only language IDs.
+
+The real host exposed another problem: its fixed-height Format Info edit did
+not support wheel scrolling, so the extra lines were present but inaccessible.
+The pane now enables vertical/automatic scrolling on that existing read-only
+multiline control, without adding or replacing controls. It handles Basic Info
+being created after the plugin panes, guards the recognized native control and
+restores its prior style on destruction. The hidden regression checks wheel
+movement and style restoration.
+
+Final MSVC Win32 Release and Debug suites passed **16/16** each (**62.24 s** /
+**83.66 s**). The expanded ogg_tag_editor regression passed in **3.66 s** /
+**3.97 s**. No compiler warnings/errors were found in the final build log;
+git diff --check passes.
+
+The final Release DLL was also exercised in an **actual Winamp 5.9.2 Build 10042**
+runtime copied into an isolated build directory, with a separate profile and a
+generated one-second 96-kHz Vorbis fixture. This was not a reconstructed host
+window. Checks verified all twelve empty controls enabled, edits of all twelve
+fields, bidirectional Basic Info/Advanced synchronization, persistence through
+native OK, discard through native Cancel, and native Format Info wheel scrolling
+(first visible line **0 -> 3**). Basic Info, scrolled Format Info and Advanced
+captures were inspected. The isolated player was closed afterward; the installed
+DLL's SHA-256 was checked unchanged. Installed profiles were not modified.
+
+Release staging at dist/Plugins/in_vorbis.dll matches the tested build output.
+PE32/x86, Release dynamic CRT and IPO/LTO remain enabled. The final staging
+SHA-256 supersedes the preceding entries:
+
+```text
+a649a776303f5f5aa5509c05ee3a1f17e3af6cc0028398e27396f16eff010217  Plugins/in_vorbis.dll
+```
+
+This verifies this Winamp version's default native UI, not every skin/version,
+artwork writing, the configuration-service matrix or complete historical parity.
+
 ## Not verified / not performed
 
 No plugin or language pack was installed into the user's Winamp, no installed

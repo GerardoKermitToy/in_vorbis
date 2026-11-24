@@ -13,9 +13,10 @@ namespace {
 void Page(std::ofstream& out,ogg_page& page){out.write(reinterpret_cast<char*>(page.header),page.header_len);out.write(reinterpret_cast<char*>(page.body),page.body_len);Check(out.good(),"write codec fixture page");}
 void Packet(std::ofstream& out,ogg_stream_state& stream,unsigned char* data,int size,int number,int granule,bool eos,bool flush=true){ogg_packet p{};p.packet=data;p.bytes=size;p.packetno=number;p.granulepos=granule;p.b_o_s=number==0;p.e_o_s=eos;Check(!ogg_stream_packetin(&stream,&p),"packet input");ogg_page page{};while(flush?ogg_stream_flush(&stream,&page):ogg_stream_pageout(&stream,&page))Page(out,page);}
 }
-void MakeVorbis(const std::filesystem::path& path,int channels,int rate,int frames,int serial){
+void MakeVorbis(const std::filesystem::path& path,int channels,int rate,int frames,int serial,const std::vector<std::string>& comments){
     vorbis_info vi{};vorbis_info_init(&vi);Check(!vorbis_encode_init_vbr(&vi,channels,rate,.4f),"initialize Vorbis encoder");
     vorbis_comment vc{};vorbis_comment_init(&vc);vorbis_comment_add_tag(&vc,"TITLE","Vorbis fixture");vorbis_comment_add_tag(&vc,"ARTIST","Independent tests");
+    for(const auto& comment:comments)vorbis_comment_add(&vc,comment.c_str());
     vorbis_dsp_state dsp{};vorbis_block block{};Check(!vorbis_analysis_init(&dsp,&vi),"Vorbis analysis");Check(!vorbis_block_init(&dsp,&block),"Vorbis block");
     ogg_stream_state stream{};Check(!ogg_stream_init(&stream,serial),"Vorbis ogg");std::ofstream out(path,std::ios::binary);ogg_packet h{},c{},b{};Check(!vorbis_analysis_headerout(&dsp,&vc,&h,&c,&b),"Vorbis headers");
     ogg_stream_packetin(&stream,&h);ogg_stream_packetin(&stream,&c);ogg_stream_packetin(&stream,&b);ogg_page page{};while(ogg_stream_flush(&stream,&page))Page(out,page);

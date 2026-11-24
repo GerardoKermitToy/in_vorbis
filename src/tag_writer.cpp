@@ -375,6 +375,7 @@ struct RequestedTag {
     std::string name;
     std::string canonical;
     std::string value;
+    bool remove = false;
 };
 
 bool ToUtf8Checked(const std::wstring& input, std::string& output, std::wstring& error) {
@@ -416,6 +417,7 @@ bool PrepareRequestedTags(const Tags& tags, std::vector<RequestedTag>& requested
             return Fail(error, L"Requested Ogg comment field names must be unique ignoring case.");
         }
         if (!ToUtf8Checked(tag.second, converted.value, error)) return false;
+        converted.remove = converted.value.empty();
         if (converted.name.size() > kMaxHeaderBytes || converted.value.size() > kMaxHeaderBytes ||
             converted.name.size() + 1 > kMaxHeaderBytes - converted.value.size()) {
             return Fail(error, L"A requested Ogg comment is too large.");
@@ -482,10 +484,10 @@ bool BuildCommentPacket(EditableCodec codec, const std::vector<Byte>& original,
     }
     std::size_t appended = 0;
     for (const auto& tag : requested) {
-        if (!tag.value.empty()) ++appended;
+        if (!tag.remove) ++appended;
     }
     const std::size_t totalFields = kept.size() + appended;
-    if (totalFields > std::numeric_limits<std::uint32_t>::max()) {
+    if (totalFields > kMaxCommentEntries) {
         return Fail(error, L"Too many Ogg comment fields after replacement.");
     }
     Byte vorbisFraming = 0;
@@ -507,7 +509,7 @@ bool BuildCommentPacket(EditableCodec codec, const std::vector<Byte>& original,
             !AppendBounded(replacement, original.data() + field.at, field.size, error)) return false;
     }
     for (const RequestedTag& tag : requested) {
-        if (tag.value.empty()) continue;
+        if (tag.remove) continue;
         const std::size_t bytes = tag.name.size() + 1 + tag.value.size();
         if (bytes > std::numeric_limits<std::uint32_t>::max() ||
             !AppendLe32Bounded(replacement, static_cast<std::uint32_t>(bytes), error) ||
@@ -945,45 +947,178 @@ void RestoreBestEffortMetadata(const std::wstring& path, const FileSnapshot& ori
     SetFileAttributesW(path.c_str(), attributes);
 }
 
+bool ExtractFields(const LinkPlan& plan, TagFields& fields, std::wstring& error) {
+    // ScanInput already validated the packet's lengths and framing. Text that
+    // cannot round-trip as Unicode is opaque and stays untouched by this editor.
+    const auto& packet = plan.comment;
+    std::size_t at = plan.codec == EditableCodec::Vorbis ? 7 : 8;
+    std::uint32_t vendor = 0, count = 0;
+    if (!TakeLe32(packet, at, vendor) || vendor > packet.size() - at) return false;
+    at += vendor;
+    if (!TakeLe32(packet, at, count)) return false;
+    fields.clear();
+    for (std::uint32_t i = 0; i != count; ++i) {
+        std::uint32_t length = 0;
+        if (!TakeLe32(packet, at, length) || length > packet.size() - at) {
+            return Fail(error, L"The Ogg comment header has a truncated field.");
+        }
+        const Byte* text = packet.data() + at;
+        at += length;
+        std::string canonical;
+        if (!IsFieldName(text, length, canonical) || IsArtworkKey(canonical)) continue;
+        const Byte* equal = std::find(text, text + length, static_cast<Byte>('='));
+        const Byte* value = equal + 1;
+        const int bytes = static_cast<int>(text + length - value);
+        if (std::find(value, value + bytes, Byte{0}) != value + bytes) continue;
+        std::wstring wide;
+        if (bytes) {
+            const int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                reinterpret_cast<const char*>(value), bytes, nullptr, 0);
+            if (!chars) continue;
+            wide.resize(chars);
+            if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                reinterpret_cast<const char*>(value), bytes, wide.data(), chars)) continue;
+        }
+        fields.push_back({std::string(reinterpret_cast<const char*>(text),
+            static_cast<std::size_t>(equal - text)), std::move(wide)});
+    }
+    return true;
+}
+
+bool PrepareDocumentEdits(const TagFields& original, const TagFields& edited,
+                         std::vector<RequestedTag>& requested, std::wstring& error) {
+    if (edited.size() > kMaxCommentEntries) return Fail(error, L"Too many requested Ogg comment fields.");
+    std::map<std::string, TagFields> before, after;
+    for (const auto& field : original) {
+        std::string canonical;
+        if (!IsFieldName(field.name, canonical)) return Fail(error, L"An Ogg comment field name is invalid.");
+        before[canonical].push_back(field);
+    }
+    std::size_t total = 0;
+    std::vector<RequestedTag> converted;
+    for (const auto& field : edited) {
+        RequestedTag tag;
+        tag.name = field.name;
+        if (!IsFieldName(tag.name, tag.canonical)) return Fail(error, L"An Ogg comment field name is invalid.");
+        if (IsArtworkKey(tag.canonical)) return Fail(error, L"Embedded artwork comments are preserved and cannot be edited here.");
+        if (!ToUtf8Checked(field.value, tag.value, error)) return false;
+        if (tag.name.size() > kMaxHeaderBytes || tag.value.size() > kMaxHeaderBytes ||
+            tag.name.size() + 1 > kMaxHeaderBytes - tag.value.size()) {
+            return Fail(error, L"A requested Ogg comment is too large.");
+        }
+        const std::size_t size = 4 + tag.name.size() + 1 + tag.value.size();
+        if (size > kMaxHeaderBytes - total) return Fail(error, L"Requested Ogg comments exceed the 16 MiB safety limit.");
+        total += size;
+        after[tag.canonical].push_back(field);
+        converted.push_back(std::move(tag));
+    }
+    requested.clear();
+    std::unordered_set<std::string> changed;
+    for (const auto& entry : after) {
+        const auto found = before.find(entry.first);
+        if (found == before.end() || found->second != entry.second) changed.insert(entry.first);
+    }
+    for (auto& tag : converted) {
+        if (changed.find(tag.canonical) != changed.end()) requested.push_back(std::move(tag));
+    }
+    for (const auto& entry : before) {
+        if (after.find(entry.first) == after.end()) requested.push_back({entry.first, entry.first, {}, true});
+    }
+    return true;
+}
+
+bool WritePrepared(const wchar_t* path, int link, const std::vector<RequestedTag>& requested,
+                   const TagDocument* expected, std::wstring& error) {
+    std::wstring sourcePath;
+    if (!AbsolutePath(path, sourcePath, error)) return false;
+    Handle source;
+    FileSnapshot original{};
+    if (!OpenSafeSource(sourcePath, source, original, error)) return false;
+    std::vector<LinkPlan> plans;
+    const std::vector<RequestedTag> noChanges;
+    if (!ScanInput(source.Get(), expected ? noChanges : requested, plans, error)) return false;
+    if (expected) {
+        if (link < 0 || static_cast<std::size_t>(link) >= plans.size()) return Fail(error, L"The requested Ogg link does not exist.");
+        TagFields current;
+        auto& plan = plans[link];
+        if (!ExtractFields(plan, current, error)) return false;
+        if (plan.serial != expected->serial || current != expected->fields) {
+            return Fail(error, L"The file's tags changed after this editor was opened. Reopen File Information before saving.");
+        }
+        std::vector<Byte> replacement;
+        if (!BuildCommentPacket(plan.codec, plan.comment, requested, replacement, error)) return false;
+        std::size_t retained = 0;
+        for (const auto& item : plans) {
+            const std::size_t bytes = item.identification.size() + item.setup.size() +
+                (&item == &plan ? replacement.size() : item.comment.size());
+            if (bytes > kMaxHeaderBytes - retained) return Fail(error, L"Ogg headers and comments exceed the 16 MiB safety limit.");
+            retained += bytes;
+        }
+        plan.comment = std::move(replacement);
+    }
+    if (!FinalizePlans(plans, link, error)) return false;
+    if (!CurrentSnapshot(source.Get(), original, error)) return false;
+    TemporaryOutput temporary;
+    if (!temporary.Create(sourcePath, error)) return false;
+    if (!RewriteToTemporary(source.Get(), temporary.File(), plans, error)) return false;
+    if (!CurrentSnapshot(source.Get(), original, error)) return false;
+    if (!SourceStillAtPath(sourcePath, original, error)) return false;
+    if (!temporary.FlushAndClose(error)) return false;
+    if (!ReplaceFileW(sourcePath.c_str(), temporary.Path().c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
+        return FailWin32(error, L"Cannot atomically replace the audio file");
+    }
+    temporary.KeepReplacement();
+    RestoreBestEffortMetadata(sourcePath, original);
+    return true;
+}
+
 } // namespace
+
+bool ReadTagDocument(const wchar_t* path, int link, TagDocument& document, std::wstring& error) {
+    error.clear();
+    try {
+        std::wstring resolved;
+        if (!AbsolutePath(path, resolved, error)) return false;
+        Handle source;
+        FileSnapshot snapshot{};
+        if (!OpenSafeSource(resolved, source, snapshot, error)) return false;
+        std::vector<LinkPlan> plans;
+        if (!ScanInput(source.Get(), {}, plans, error)) return false;
+        if (link < 0 || static_cast<std::size_t>(link) >= plans.size()) return Fail(error, L"The requested Ogg link does not exist.");
+        TagDocument result;
+        result.link = link;
+        result.serial = plans[link].serial;
+        if (!ExtractFields(plans[link], result.fields, error) || !CurrentSnapshot(source.Get(), snapshot, error)) return false;
+        document = std::move(result);
+        return true;
+    } catch (...) {
+        return Fail(error, L"Cannot read the Ogg comments for editing.");
+    }
+}
+
+bool WriteTagDocument(const wchar_t* path, const TagDocument& original,
+                      const TagFields& edited, std::wstring& error) {
+    error.clear();
+    try {
+        std::vector<RequestedTag> requested;
+        if (!PrepareDocumentEdits(original.fields, edited, requested, error)) return false;
+        if (requested.empty()) return true;
+        return WritePrepared(path, original.link, requested, &original, error);
+    } catch (...) {
+        return Fail(error, L"Unexpected failure while writing Ogg tags.");
+    }
+}
 
 bool WriteTags(const wchar_t* path, int link, const Tags& tags, std::wstring& error) {
     error.clear();
     try {
         std::vector<RequestedTag> requested;
         if (!PrepareRequestedTags(tags, requested, error)) return false;
-
-        std::wstring sourcePath;
-        if (!AbsolutePath(path, sourcePath, error)) return false;
-
-        Handle source;
-        FileSnapshot original{};
-        if (!OpenSafeSource(sourcePath, source, original, error)) return false;
-
-        std::vector<LinkPlan> plans;
-        if (!ScanInput(source.Get(), requested, plans, error)) return false;
-        if (!FinalizePlans(plans, link, error)) return false;
-        if (!CurrentSnapshot(source.Get(), original, error)) return false;
-
-        TemporaryOutput temporary;
-        if (!temporary.Create(sourcePath, error)) return false;
-        if (!RewriteToTemporary(source.Get(), temporary.File(), plans, error)) return false;
-        if (!CurrentSnapshot(source.Get(), original, error)) return false;
-        if (!SourceStillAtPath(sourcePath, original, error)) return false;
-        if (!temporary.FlushAndClose(error)) return false;
-
-        if (!ReplaceFileW(sourcePath.c_str(), temporary.Path().c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
-            return FailWin32(error, L"Cannot atomically replace the audio file");
-        }
-        temporary.KeepReplacement();
-        RestoreBestEffortMetadata(sourcePath, original);
-        return true;
+        return WritePrepared(path, link, requested, nullptr, error);
     } catch (const std::bad_alloc&) {
-        error = L"Not enough memory to process Ogg tags safely.";
-        return false;
+        return Fail(error, L"Not enough memory to process Ogg tags safely.");
     } catch (...) {
-        error = L"Unexpected failure while writing Ogg tags.";
-        return false;
+        return Fail(error, L"Unexpected failure while writing Ogg tags.");
     }
 }
 

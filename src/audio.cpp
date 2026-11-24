@@ -34,7 +34,7 @@ bool Audio::Open(const wchar_t* path,Settings s,bool shuffle,std::wstring& error
         error=L"This build does not include Speex decoding.";return false;
 #endif
     default:error=L"Not a supported Ogg Vorbis, Opus, FLAC, or Speex stream.";return false;}
-    if(!reader_)return false;stream_->FinishProbe();info_=reader_->Info();info_.path=path;info_.station=stream_->Info();info_.radio=stream_->Radio();
+    if(!reader_)return false;stream_->FinishProbe();info_=reader_->Info();info_.path=path;info_.file_size=stream_->SourceSize();info_.station=stream_->Info();info_.radio=stream_->Radio();
     source_rate_=info_.current.rate;if(source_rate_<1000||source_rate_>768000||info_.current.channels<1||info_.current.channels>MaxChannels){error=L"Unsupported audio rate or channel count.";reader_.reset();return false;}
     channels_=OutputChannels(settings_.channels,info_.current.channels);
     if(!negotiate_&&(settings_.channels==ChannelMode::Source||settings_.channels==ChannelMode::LegacyUnmapped)){
@@ -87,7 +87,7 @@ int Audio::Read(float* out,int capacity){
     const bool link_changed=next.current_link!=info_.current_link;
     bool changed=link_changed||next.current.rate!=info_.current.rate||next.current.channels!=info_.current.channels||
         next.current.bitrate!=info_.current.bitrate||next.current.frames!=info_.current.frames;
-    if(changed){auto path=std::move(info_.path);auto title=std::move(info_.title);auto station=std::move(info_.station);info_=next;info_.path=std::move(path);info_.title=std::move(title);info_.station=std::move(station);info_.radio=stream_->Radio();}
+    if(changed){auto path=std::move(info_.path);auto title=std::move(info_.title);auto station=std::move(info_.station);info_=next;info_.path=std::move(path);info_.file_size=stream_->SourceSize();info_.title=std::move(title);info_.station=std::move(station);info_.radio=stream_->Radio();}
     bool title_changed=link_changed;
     if(info_.duration_ms!=next.duration_ms){info_.duration_ms=next.duration_ms;changed=true;}
     if(info_.station.title!=stream_->Info().title||info_.station.recording_error!=stream_->Info().recording_error){title_changed|=info_.station.title!=stream_->Info().title;info_.station=stream_->Info();changed=true;}

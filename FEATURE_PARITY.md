@@ -35,7 +35,7 @@ all Winamp versions or every file in the wild have been tested.
 | HTTP seeking | Opt-in known-length HTTP Range access; validated status and Content-Range | Byte seeking, rewind, EOF and decoded time seeking |
 | Stream recording | Ogg audio bytes without ICY metadata, explicit destination, visible write errors | Recorded bytes match the source Ogg fixture |
 | Reconnect | Bounded retry policy with a stable output format | DLL reconnects and decodes a second loopback connection without reopening output |
-| Dialogs | Native classic controls; five settings tabs; standard/custom tags; chain navigation; read-only unified pane | All tabs and control bounds, actual tag save/delete, settings OK/Cancel; captured images visually inspected |
+| Dialogs | Native classic controls; five settings tabs; standalone standard/custom tags and chain navigation; editable unified Advanced tab synchronized with Winamp Basic Info | Classic tag save/delete; unified host broadcasts, repeated/long/multiline fields, rename, Delete/Delete All, OK/Cancel, stale-edit refusal and audio/artwork preservation |
 | Settings | Independent per-user local fallback plus read-only Winamp ReplayGain/proxy snapshots | Defaults, persistence/bounds, documented config-service dispatch, all RG modes, port-80 restriction, absent/invalid host items and credential rejection |
 | Language packs | Independent Wasabi language module, per-string English fallback, text-only native dialogs, compatible legacy Name/Value labels | Mock IPC/service lifetime, partial/missing/malformed translations, no user-text/layout changes, cache reset |
 | Matroska | Optional Wasabi `A_VORBIS` decoder service, new independent GUID/name, Xiph-laced headers, 16/24/float PCM | Mock IPC registration, dispatch, decoder formats, malformed headers, output capacity guards/retry, flush/EOS/close |
@@ -46,6 +46,60 @@ argument array required the address of a pointer. A debugger identified that
 mock-call error; the test now uses the correct pointer indirection and also
 unregisters its mock service before unwinding the manager's lifetime. It must
 pass like the other suites; it is not disabled or skipped.
+
+## Unified tag editor
+
+For local files, the default File Info window is Winamp's own window: Winamp
+supplies Basic Info, Artwork, the path and OK/Cancel. The plugin contributes one
+Advanced child, not another set of standard fields or a second editor launcher.
+Its two-column list, Name entry, multiline Value entry and Add New / Delete /
+Delete All buttons are independently authored native controls.
+
+Advanced and Basic Info exchange the host's `WM_USER` field broadcasts in both
+directions. The pane sets `INBUILT_NOWRITEINFO` on its parent while alive so the
+host does not also commit the same edit through the generic setters. The prior
+property value is restored on destruction. OK commits; Cancel and closing discard
+uncommitted drafts. The optional standalone dialog remains the fallback when
+unified File Info is disabled.
+
+All twelve Basic Info fields stay available even when their tags are absent:
+Track #, Disc #, BPM, Title, Artist, Album, Album Artist, Year, Genre, Comment,
+Composer and Publisher. The metadata getter returns success with an empty
+value for supported-but-unset fields, rather than telling Winamp to disable
+those controls. Historical alias fallbacks also work when the primary field
+exists but is empty.
+
+Format Info starts with the historical Length / Average bitrate / File size /
+Channels / Sampling rate / Serial number / Version / Vendor block. Average
+bitrate uses complete container bytes and native duration, not the audio-only
+bitrate. Header bitrate bounds are shown when present. Additional known facts
+follow: codec, exact duration and samples per channel, lossless source bit depth,
+chained-link identity, Opus header gain and decoder details. Unknown facts and
+lossy source bit depth are not invented. Labels use append-only language IDs.
+Winamp 5.x's existing read-only Format Info edit receives vertical/mouse-wheel
+scrolling so long vendor text and extra facts remain reachable. No replacement
+control is added; the original style is restored on pane destruction. Unknown
+host layouts retain their own behavior.
+
+The editor reads an ordered comment snapshot rather than the playback display
+map. Repeated names remain separate rows; empty values, multiline Unicode,
+long names and long values round-trip without fixed UI-buffer truncation. Only
+changed field groups are rewritten. Unchanged text, opaque comments, artwork,
+other chained links and encoded audio are retained. The existing writer's
+aggregate 16 MiB header bound and structural validation still apply. A changed
+source comment snapshot is reported instead of silently overwriting a concurrent
+edit. Unsupported writable formats have a read-only Advanced pane.
+
+The `ogg_tag_editor` CTest loads the real DLL into a mock unified host. It runs
+with hidden host windows by default; expected failures are tested directly at
+the writer boundary, and an unexpected top-level dialog is blocked at creation
+and fails the test. Visible screenshot capture requires the explicit
+`OGG_TEST_CAPTURE_UI` environment variable. The test does not establish the
+appearance of an installed Winamp skin or provide an artwork editing service.
+A separate native-host check in an isolated Winamp 5.9.2 Build 10042 runtime
+verified enabled empty fields, all twelve field round trips, Basic Info/Advanced
+synchronization, OK/Cancel and scrolling of the existing Format Info field.
+The installed player's DLL and profile were not used as writable test targets.
 
 ## Implemented, but not exhaustively tested
 

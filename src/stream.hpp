@@ -26,6 +26,8 @@ public:
     bool Seek(std::int64_t, int origin) noexcept;
     std::int64_t Tell() const noexcept;
     std::int64_t Size() const noexcept { return size_; }
+    // Includes any RIFF wrapper; Size() remains the seekable Ogg payload size.
+    std::int64_t SourceSize() const noexcept { return source_size_; }
     bool Seekable() const noexcept { return file_ || !memory_.empty() || http_seekable_; }
     bool Radio() const noexcept { return radio_ && !http_seekable_; }
     bool Local() const noexcept { return !radio_; }
@@ -43,7 +45,7 @@ private:
     std::atomic<HINTERNET> request_{nullptr};
     std::atomic<bool> cancelled_{false};
     std::vector<unsigned char> memory_, prefix_;
-    std::int64_t position_ = 0, size_ = -1, base_offset_ = 0;
+    std::int64_t position_ = 0, size_ = -1, source_size_ = -1, base_offset_ = 0;
     std::size_t replay_ = 0;
     bool radio_ = false, opening_ = true, replaying_ = false, http_seekable_ = false;
     std::wstring resource_;
