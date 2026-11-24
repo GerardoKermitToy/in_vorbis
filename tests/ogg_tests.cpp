@@ -14,10 +14,48 @@ std::int64_t Drain(Audio& a,Settings settings,std::vector<float>* floats=nullptr
     Pcm pipeline(a,settings);Check(pipeline.Ready(),"PCM ready");std::array<std::uint32_t,BlockFrames*MaxChannels+2> buffer{};auto* data=reinterpret_cast<unsigned char*>(buffer.data()+1);int size=BlockFrames*a.Channels()*settings.bits/8;std::int64_t frames=0;
     for(;;){buffer[0]=0x12345678;memset(data+size,0xa5,4);int n=pipeline.Read(data,BlockFrames);Check(n>=0&&n<=BlockFrames,"PCM read capacity");Check(buffer[0]==0x12345678,"lower PCM guard");for(int i=0;i<4;++i)Check(data[size+i]==0xa5,"upper PCM guard");if(!n)return frames;frames+=n;}
 }
+#ifdef OGG_HAVE_SPEEX
+void SpeexSeeks(const std::filesystem::path& path,int rate,int frames,bool buffered=false){
+    Settings s;s.buffer_small_files=buffered;Audio a;std::wstring error;
+    Check(a.Open(path.c_str(),s,false,error),"open Speex seek fixture");
+    const int duration=static_cast<int>(frames*1000LL/rate);
+    Check(a.Info().seekable&&!a.Info().radio&&a.Info().duration_ms==duration,"Speex duration available before first read");
+    Check(a.Info().links.size()==1&&a.Info().current.frames==frames,"Speex startup link sample count");
+    const auto metadata=a.Info().current;
+    Check(metadata.tags.at("title")==L"Speex fixture","Speex indexed comments available at startup");
+    Check(Drain(a,s)==frames,"indexed Speex preserves all PCM");
+    for(int ms:{duration*3/4,duration/4,0,duration/2}){
+        Check(a.Seek(ms),"Speex repeated forward/backward seek");
+        const auto remaining=Drain(a,s);
+        Check(std::abs(remaining-(frames-rate*static_cast<long long>(ms)/1000))<=1,"Speex seek remaining sample count");
+        Check(a.Info().duration_ms==duration&&a.Info().links.size()==1&&a.Info().current.frames==frames,
+              "Speex seek retains indexed duration and links");
+        Check(a.Info().current.tags==metadata.tags&&a.Info().current.vendor==metadata.vendor,"Speex seek preserves metadata");
+    }
+    Check(a.Seek(duration+1000),"Speex seek past EOF succeeds");
+    std::array<float,BlockFrames*MaxChannels> data{};
+    Check(a.Read(data.data(),BlockFrames)==0,"Speex seek past EOF leaves no PCM");
+    Check(a.Seek(0)&&Drain(a,s)==frames,"Speex rewind after EOF");
+}
+#endif
 }
 int wmain(int argc,wchar_t** argv){try{
     if(argc==3&&std::wstring(argv[1])==L"--radio"){Audio a;Settings s;std::wstring error;if(!a.Open(argv[2],s,false,error))throw std::runtime_error(ToUtf8(error));Check(a.Info().radio&&!a.Info().seekable,"HTTP radio flags");Pcm pcm(a,s);std::array<short,BlockFrames*2> samples{};int frames=0;for(int i=0;i<30;++i){int n=pcm.Read(samples.data(),BlockFrames);Check(n>0,"live radio decode");frames+=n;}std::wcout<<CodecName(a.Info().codec)<<L": "<<frames<<L" frames, "<<a.Info().station.name<<L"\n";return 0;}
-    Check(argc==2,"usage: ogg_tests DIRECTORY | --radio URL");auto directory=std::filesystem::path(argv[1]);std::filesystem::create_directories(directory);
+    if(argc==3&&std::wstring(argv[1])==L"--file"){
+        Audio a;Settings s;std::wstring error;Check(a.Open(argv[2],s,false,error),ToUtf8(error).c_str());
+        const int duration=a.Info().duration_ms;
+        std::wcout<<CodecName(a.Info().codec)<<L": duration="<<duration<<L" ms, seekable="<<a.Info().seekable<<L", rate="<<a.SourceRate()<<L"\n";
+        Check(a.Info().seekable&&duration>0,"local duration available before playback");
+        std::array<float,BlockFrames*MaxChannels> data{};
+        for(int ms:{duration*3/4,duration/4,0}){
+            Check(a.Seek(ms),"external file time seek");Check(a.Read(data.data(),BlockFrames)>0,"external file PCM after seek");
+            Check(a.Info().duration_ms==duration,"external file duration retained after seek");
+            std::cout<<"Seek to "<<ms<<" ms: PCM available\n";
+        }
+        Check(a.Seek(duration+1)&&a.Read(data.data(),BlockFrames)==0,"external file seek past EOF");
+        return 0;
+    }
+    Check(argc==2,"usage: ogg_tests DIRECTORY | --radio URL | --file FILE");auto directory=std::filesystem::path(argv[1]);std::filesystem::create_directories(directory);
     constexpr int frames=7013;auto opus=directory/L"Opus｜test.ogg",vorbis=directory/L"Vorbis.ogg",flac=directory/L"FLAC.oga",speex=directory/L"Speex.spx";
     MakeOpus(opus,2,frames,2001);MakeVorbis(vorbis,2,44100,frames,2002);MakeFlac(flac,2,44100,frames);MakeSpeex(speex,16000,frames);
     std::vector<std::filesystem::path> paths{opus,vorbis,flac};
@@ -50,10 +88,22 @@ int wmain(int argc,wchar_t** argv){try{
         Check(a.Info().links.size()==2,"FLAC discovers chained metadata");
     }
 #ifdef OGG_HAVE_SPEEX
+    for(int rate:{8000,16000,32000}){
+        auto path=directory/(L"seek-speex-"+std::to_wstring(rate)+L".spx");MakeSpeex(path,rate,96001,3350+rate,50);
+        SpeexSeeks(path,rate,96001);SpeexSeeks(path,rate,96001,true);
+    }
     {auto chain=directory/L"speex-chain.spx",tail=directory/L"speex-tail.spx";
         MakeSpeex(chain,16000,frames,3301);MakeSpeex(tail,8000,frames,3302);AppendFile(chain,tail);
         Audio a;Settings s;std::wstring error;Check(a.Open(chain.c_str(),s,false,error),"Speex chain open");
+        const int duration=frames*1000/16000+frames*1000/8000;
+        Check(a.Info().links.size()==2&&a.Info().duration_ms==duration,"Speex complete chain duration at startup");
+        Check(a.Info().links[0].frames==frames&&a.Info().links[1].frames==frames,"Speex indexed chained sample counts");
         Check(std::abs(Drain(a,s)-3*frames)<=2,"Speex mixed-rate chain complete output");
+        for(int ms:{500,100,1000,0}){
+            Check(a.Seek(ms),"Speex seek across mixed-rate links");
+            Check(std::abs(Drain(a,s)-(3*frames-ms*16LL))<=2,"Speex mixed-rate seek output duration");
+            Check(a.Info().links.size()==2&&a.Info().duration_ms==duration,"Speex seek retains complete chain index");
+        }
     }
 #endif
     {auto path=directory/L"replaygain.ogg";MakeVorbis(path,2,48000,frames,3401);

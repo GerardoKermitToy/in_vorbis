@@ -28,6 +28,7 @@ public:
     std::int64_t Size() const noexcept { return size_; }
     bool Seekable() const noexcept { return file_ || !memory_.empty() || http_seekable_; }
     bool Radio() const noexcept { return radio_ && !http_seekable_; }
+    bool Local() const noexcept { return !radio_; }
     void Cancel() noexcept;
     void FinishProbe();
     bool RewindProbe() noexcept;

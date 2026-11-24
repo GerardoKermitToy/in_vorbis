@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24...4.4)
-project(WinampOgg VERSION 1.2.0 LANGUAGES C CXX)
+project(WinampOgg VERSION 1.2.1 LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR "Use MSVC with -A Win32 for 32-bit Winamp.")
 endif()

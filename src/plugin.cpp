@@ -212,7 +212,7 @@ bool ParseGain(const wchar_t* input,double& db){
 }
 std::wstring Ansi(const char* s){if(!s)return{};int n=MultiByteToWideChar(CP_ACP,0,s,-1,nullptr,0);if(n<=0)return{};std::wstring v(n,0);MultiByteToWideChar(CP_ACP,0,s,-1,v.data(),n);v.pop_back();return v;}
 }
-extern "C" winamp::InModule* __cdecl winampGetInModule2(){static bool ready=[](){static char description[]="Independent Ogg Input 1.2.0 (Vorbis/Opus/FLAC/Speex, x86)";static char extensions[]="ogg;oga;spx\0Ogg Audio (*.ogg;*.oga;*.spx)\0";
+extern "C" winamp::InModule* __cdecl winampGetInModule2(){static bool ready=[](){static char description[]="Independent Ogg Input 1.2.1 (Vorbis/Opus/FLAC/Speex, x86)";static char extensions[]="ogg;oga;spx\0Ogg Audio (*.ogg;*.oga;*.spx)\0";
     module.version=winamp::kInputVersion;module.description=description;module.FileExtensions=extensions;module.is_seekable=1;module.UsesOutputPlug=1;
     module.Init=Init;module.Quit=Quit;module.Config=Config;module.About=About;module.GetFileInfo=GetFileInfo;module.InfoBox=InfoBox;module.IsOurFile=IsOurFile;module.Play=Play;module.Stop=Stop;module.Pause=Pause;module.UnPause=Unpause;module.IsPaused=Paused;module.GetLength=Length;module.GetOutputTime=Time;module.SetOutputTime=Seek;module.SetVolume=Volume;module.SetPan=Pan;module.EQSet=Eq;return true;}();(void)ready;return &module;}
 extern "C" int __cdecl winampGetExtendedFileInfoW(const wchar_t* path,const char* key,wchar_t* result,int capacity){if(!result||capacity<1||!key)return 0;result[0]=0;try{if((!path||!*path)&&!strcmp(key,"type")){Copy(result,capacity,L"0");return 1;}auto i=GetInfo(path);if(i.codec==Codec::Unknown)return 0;std::wstring value;if(!Metadata(i,key,value))return 0;Copy(result,capacity,value);return 1;}catch(...){return 0;}}

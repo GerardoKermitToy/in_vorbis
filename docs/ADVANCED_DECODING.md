@@ -1,4 +1,4 @@
-# Advanced decoding — 1.2.0
+# Advanced decoding — 1.2.1
 
 ## Exact integer FLAC
 

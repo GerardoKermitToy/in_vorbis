@@ -1,4 +1,7 @@
-# Verification — 1.2.0 — 2026-11-23
+# Verification — 1.2.1 — 2026-11-24
+
+Version 1.2.1 includes the local Speex seek-bar correction recorded below.
+Earlier 1.2.0 runs, package names and checksums are retained as historical records.
 
 ## Final build and regression results
 
@@ -200,10 +203,37 @@ final Release build. SHA-256 (build-specific; separate build trees may differ):
 e52acf8062c7eb49381e4eeac05f9a37197047cfa66039b6455d5de7d667c6b0  Plugins/in_vorbis.dll
 ```
 
+## Local Speex seek-bar correction — 1.2.1 — 2026-11-24
+
+The final 1.2.1 Win32 builds passed **15/15 Release** (44.26 s) and
+**15/15 Debug** (54.47 s) tests. Both DLLs were checked for FileVersion,
+ProductVersion and plugin-description version **1.2.1**. The supplied Speex
+sample also passed the standalone core and real-DLL checks in both builds.
+
+Seekable local Speex input previously reported an unknown duration until EOS.
+New core and DLL regressions reproduced `duration_ms == -1` before playback,
+which prevents Winamp from exposing its seek bar even though seeking is enabled.
+
+Local files now get a header/EOS-granule indexing pass without decoding PCM.
+The complete link catalogue, durations and comments survive rewinds; reparsing
+comments does not append duplicate tag values. Seeking past EOF succeeds with
+no pending PCM, and a subsequent rewind still decodes the complete file.
+HTTP startup retains its probe limits rather than downloading an entire file
+for this index; live radio remains forward-only and finite HTTP byte/time seeking
+still uses the transport's validated Range path.
+
+Regression fixtures cover 8/16/32-kHz Speex, grouped audio pages, file/memory
+transport, mixed-rate chains, repeated forward/backward seeks, EOF/rewind,
+stable metadata, and the DLL's startup length, paused seek/flush and resume.
+The core test's `--file FILE` mode and the DLL test's optional local-file argument
+also exercised the supplied 32-kHz mono sample: **263589 ms** before playback,
+with successful seeks to **197691 ms**, **65897 ms** and zero. These are mock-host
+DLL checks, not an installed Winamp or audio-hardware check.
+
 ## Not verified / not performed
 
 No plugin or language pack was installed into the user's Winamp, no installed
-Winamp DLL was replaced, and no commit, push or public release was made.
+Winamp DLL was replaced, and no push or public release was made.
 Actual Winamp configuration/language service integration, Matroska through an
 installed in_mkv, and real output-plugin/hardware 96-kHz compatibility remain
 unverified. A complete TLS/proxy/authentication matrix and large external

@@ -113,6 +113,7 @@ class SpeexReader final : public CodecReader {
     int pending_channels_ = 0;
     int pending_link_ = -1;
     int active_link_ = -1;
+    int next_link_ = 0;
     int active_serial_ = 0;
     int frame_size_ = 0;
     int frames_per_packet_ = 0;
@@ -133,6 +134,7 @@ class SpeexReader final : public CodecReader {
     bool initial_headers_ready_ = false;
     bool enhanced_ = true;
     bool source_seekable_ = false;
+    bool indexed_ = false;
 
     void ClearDecoder() noexcept {
         if (decoder_) speex_decoder_destroy(decoder_);
@@ -169,10 +171,17 @@ class SpeexReader final : public CodecReader {
     }
 
     void ResetInfo() noexcept {
-        info_ = {};
-        info_.codec = Codec::Speex;
-        info_.seekable = source_seekable_;
-        info_.radio = stream_ && stream_->Radio();
+        if (!indexed_) {
+            info_ = {};
+            info_.codec = Codec::Speex;
+            info_.seekable = source_seekable_;
+            info_.radio = stream_ && stream_->Radio();
+        } else {
+            // Keep the complete duration/link catalogue across rewinds.
+            info_.current = {};
+            info_.current_link = 0;
+        }
+        next_link_ = 0;
         stage_ = Stage::Header;
         page_ = {};
         last_granule_ = 0;
@@ -359,7 +368,8 @@ class SpeexReader final : public CodecReader {
             }
             if (page_result == 0) {
                 if (input_eof_) {
-                    if (active_link_ >= 0 || ogg_initialized_) {
+                    if (active_link_ >= 0 || ogg_initialized_ ||
+                        (indexed_ && next_link_ != static_cast<int>(info_.links.size()))) {
                         failed_ = true;
                         return PullResult::Error;
                     }
@@ -396,6 +406,12 @@ class SpeexReader final : public CodecReader {
             return HeaderResult::NotSpeex;
         RawSpeexHeader raw;
         if (!ReadRawHeader(packet, raw)) return HeaderResult::Invalid;
+        if (indexed_) {
+            if (next_link_ >= static_cast<int>(info_.links.size())) return HeaderResult::Invalid;
+            const auto& known = info_.links[static_cast<size_t>(next_link_)];
+            if (known.serial != static_cast<std::uint32_t>(active_serial_) || known.rate != raw.rate ||
+                known.channels != raw.channels || known.bitrate != std::max(0, raw.bitrate)) return HeaderResult::Invalid;
+        }
 
         auto* header = speex_packet_to_header(reinterpret_cast<char*>(packet.packet), packet.bytes);
         if (!header) return HeaderResult::Invalid;
@@ -459,13 +475,15 @@ class SpeexReader final : public CodecReader {
             const size_t samples = static_cast<size_t>(decoded_frame_size) * raw.channels;
             if (samples > static_cast<size_t>(kMaxFrameSize) * MaxChannels) throw std::bad_alloc();
             frame_.assign(samples, 0.0f);
-            LinkInfo link;
-            link.rate = raw.rate;
-            link.channels = raw.channels;
-            link.bitrate = std::max(0, raw.bitrate);
-            link.serial = static_cast<std::uint32_t>(active_serial_);
-            if (info_.links.size() >= kMaxLinks) throw std::bad_alloc();
-            info_.links.push_back(std::move(link));
+            if (!indexed_) {
+                LinkInfo link;
+                link.rate = raw.rate;
+                link.channels = raw.channels;
+                link.bitrate = std::max(0, raw.bitrate);
+                link.serial = static_cast<std::uint32_t>(active_serial_);
+                if (info_.links.size() >= kMaxLinks) throw std::bad_alloc();
+                info_.links.push_back(std::move(link));
+            }
         } catch (...) {
             if (stereo) speex_stereo_state_destroy(stereo);
             speex_decoder_destroy(decoder);
@@ -480,7 +498,7 @@ class SpeexReader final : public CodecReader {
         stereo_callback_ = callback;
         speex_bits_init(&bits_);
         bits_initialized_ = true;
-        active_link_ = static_cast<int>(info_.links.size()) - 1;
+        active_link_ = next_link_++;
         frame_size_ = decoded_frame_size;
         frames_per_packet_ = raw.frames_per_packet;
         extra_headers_ = raw.extra_headers;
@@ -509,7 +527,7 @@ class SpeexReader final : public CodecReader {
         if (!get32(vendor_length) || vendor_length > size - at || vendor_length > static_cast<std::uint32_t>(kMetadataBudget)) return false;
         auto& link = info_.links[static_cast<size_t>(active_link_)];
         int budget = kMetadataBudget - static_cast<int>(vendor_length);
-        if (vendor_length && vendor_length <= 65536)
+        if (!indexed_ && vendor_length && vendor_length <= 65536)
             link.vendor = Utf8(reinterpret_cast<const char*>(bytes + at), static_cast<int>(vendor_length));
         at += vendor_length;
         std::uint32_t comment_count = 0;
@@ -519,7 +537,7 @@ class SpeexReader final : public CodecReader {
             if (!get32(length) || length > size - at) return false;
             if (length > static_cast<std::uint32_t>(budget)) return false;
             budget -= static_cast<int>(length);
-            if (length && length <= 65536)
+            if (!indexed_ && length && length <= 65536)
                 AddTag(link.tags, reinterpret_cast<const char*>(bytes + at), static_cast<int>(length));
             at += length;
         }
@@ -637,6 +655,26 @@ class SpeexReader final : public CodecReader {
         return PendingResult::Error;
     }
 
+    bool Index() {
+        // Winamp needs a finite duration before Play returns to enable seeking.
+        // Reuse the bounded demux/header parser, but do not decode audio in this
+        // pass: EOS granules provide each logical link's native sample count.
+        for (;;) {
+            ogg_packet packet{};
+            const auto result = PullPacket(packet);
+            if (result == PullResult::Eof) {
+                indexed_ = true;
+                return ResetForSeek();
+            }
+            if (result != PullResult::Packet) return false;
+            if (stage_ == Stage::Audio) {
+                if (!packet.packet || packet.bytes <= 0 || packet.bytes > kMaxPacketBytes) return false;
+                if (packet.e_o_s) FinishLink(packet.granulepos >= 0 ? packet.granulepos : page_.granule);
+                if (failed_) return false;
+            } else if (!ProcessPacket(packet)) return false;
+        }
+    }
+
     bool ResetForSeek() {
         if (!stream_ || !source_seekable_ || !stream_->Seek(0, SEEK_SET)) return false;
         ClearPipeline();
@@ -648,6 +686,7 @@ class SpeexReader final : public CodecReader {
         long double remaining = static_cast<long double>(milliseconds) / 1000.0L;
         while (remaining > 0.0L) {
             const auto result = ProducePending();
+            if (result == PendingResult::Eof) return true;
             if (result != PendingResult::Available) return false;
             if (pending_link_ < 0 || pending_link_ >= static_cast<int>(info_.links.size())) return false;
             PublishLink(pending_link_);
@@ -681,7 +720,8 @@ public:
         enhanced_ = settings.enhanced_speex;
         source_seekable_ = stream_->Seekable();
         ResetInfo();
-        if (!Initialize()) {
+        // Do not turn bounded HTTP startup probing into a whole-file download.
+        if (!Initialize() || (source_seekable_ && stream_->Local() && !Index())) {
             error = L"Cannot open Ogg Speex stream.";
             return false;
         }

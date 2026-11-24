@@ -1,4 +1,4 @@
-# Independent Winamp Ogg Input 1.2.0
+# Independent Winamp Ogg Input 1.2.1
 
 This package contains 32-bit Winamp input plugins:
 
