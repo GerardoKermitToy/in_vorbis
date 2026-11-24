@@ -17,18 +17,18 @@ using namespace ogg_input;
 namespace {
 std::vector<char> Bytes(const std::filesystem::path& path){std::ifstream f(path,std::ios::binary);return {std::istreambuf_iterator<char>(f),{}};}
 class Server{
-    SOCKET socket_=INVALID_SOCKET;unsigned short port_=0;std::thread worker_;std::atomic<bool> stop_{false};std::vector<char> opus_,vorbis_,speex_;
+    SOCKET socket_=INVALID_SOCKET;unsigned short port_=0;std::thread worker_;std::atomic<bool> stop_{false};std::vector<char> opus_,vorbis_,speex_,flac_;
     static bool Send(SOCKET s,const char* p,int n){while(n){int made=send(s,p,n,0);if(made<=0)return false;p+=made;n-=made;}return true;}
     void Run(){while(!stop_){fd_set ready;FD_ZERO(&ready);FD_SET(socket_,&ready);timeval timeout{0,100000};if(select(0,&ready,nullptr,nullptr,&timeout)<=0)continue;SOCKET c=accept(socket_,nullptr,nullptr);if(c==INVALID_SOCKET)continue;DWORD ms=1000;setsockopt(c,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<char*>(&ms),4);setsockopt(c,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<char*>(&ms),4);
         char buffer[1024]{};std::string request;while(request.size()<8192&&request.find("\r\n\r\n")==std::string::npos){int n=recv(c,buffer,sizeof(buffer),0);if(n<=0)break;request.append(buffer,n);}
-        bool icy=request.find("GET /icy ")==0,chunked=request.find("GET /chunked ")==0,vorbis=request.find("GET /vorbis.ogg ")==0,speex=request.find("GET /speex.spx ")==0,slow=request.find("GET /slow ")==0;
-        if(request.find("GET /file ")==0||request.find("GET /file-vorbis ")==0||request.find("GET /file-speex ")==0){
-            const auto& body=request.find("GET /file-speex ")==0?speex_:request.find("GET /file-vorbis ")==0?vorbis_:opus_;std::size_t start=0;auto range=request.find("\r\nRange: bytes=");bool partial=range!=std::string::npos;if(partial)start=static_cast<std::size_t>(std::strtoull(request.c_str()+range+15,nullptr,10));
+        bool icy=request.find("GET /icy ")==0,chunked=request.find("GET /chunked ")==0,vorbis=request.find("GET /vorbis.ogg ")==0,speex=request.find("GET /speex.spx ")==0,flac=request.find("GET /flac.oga ")==0,slow=request.find("GET /slow ")==0;
+        if(request.find("GET /file ")==0||request.find("GET /file-vorbis ")==0||request.find("GET /file-speex ")==0||request.find("GET /file-flac ")==0){
+            const auto& body=request.find("GET /file-flac ")==0?flac_:request.find("GET /file-speex ")==0?speex_:request.find("GET /file-vorbis ")==0?vorbis_:opus_;std::size_t start=0;auto range=request.find("\r\nRange: bytes=");bool partial=range!=std::string::npos;if(partial)start=static_cast<std::size_t>(std::strtoull(request.c_str()+range+15,nullptr,10));
             if(start>=body.size()){constexpr char response[]="HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";Send(c,response,sizeof(response)-1);}
             else{std::string h=partial?"HTTP/1.1 206 Partial Content\r\n":"HTTP/1.1 200 OK\r\n";h+="Accept-Ranges: bytes\r\nContent-Type: audio/ogg\r\nConnection: close\r\nContent-Length: "+std::to_string(body.size()-start)+"\r\n";if(partial)h+="Content-Range: bytes "+std::to_string(start)+"-"+std::to_string(body.size()-1)+"/"+std::to_string(body.size())+"\r\n";h+="\r\n";Send(c,h.data(),static_cast<int>(h.size()));Send(c,body.data()+start,static_cast<int>(body.size()-start));}
         }
         else if(request.find("GET /redirect ")==0){std::string h="HTTP/1.1 302 Found\r\nLocation: /stream.ogg\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";Send(c,h.data(),static_cast<int>(h.size()));}
-        else{std::vector<char> body=speex?speex_:vorbis?vorbis_:opus_;if(icy){std::vector<char> replaced;std::string metadata="StreamTitle='Loopback title';";metadata.resize(32,'\0');for(std::size_t at=0;at<body.size();){auto n=std::min<std::size_t>(128,body.size()-at);replaced.insert(replaced.end(),body.begin()+at,body.begin()+at+n);at+=n;if(n==128){replaced.push_back(2);replaced.insert(replaced.end(),metadata.begin(),metadata.end());}}body=std::move(replaced);}
+        else{std::vector<char> body=flac?flac_:speex?speex_:vorbis?vorbis_:opus_;if(icy){std::vector<char> replaced;std::string metadata="StreamTitle='Loopback title';";metadata.resize(32,'\0');for(std::size_t at=0;at<body.size();){auto n=std::min<std::size_t>(128,body.size()-at);replaced.insert(replaced.end(),body.begin()+at,body.begin()+at+n);at+=n;if(n==128){replaced.push_back(2);replaced.insert(replaced.end(),metadata.begin(),metadata.end());}}body=std::move(replaced);}
             std::string h="HTTP/1.1 200 OK\r\nContent-Type: application/ogg\r\nicy-name: Loopback Radio\r\nicy-br: 128\r\nConnection: close\r\n";if(icy)h+="icy-metaint: 128\r\n";if(chunked)h+="Transfer-Encoding: chunked\r\n";else if(!slow)h+="Content-Length: "+std::to_string(body.size())+"\r\n";h+="\r\n";Send(c,h.data(),static_cast<int>(h.size()));
             if(slow){while(!stop_)std::this_thread::sleep_for(std::chrono::milliseconds(5));}
             else if(chunked){for(std::size_t at=0;at<body.size();){int n=static_cast<int>(std::min<std::size_t>(47,body.size()-at));char hex[32]{};sprintf_s(hex,"%x\r\n",n);if(!Send(c,hex,static_cast<int>(strlen(hex)))||!Send(c,body.data()+at,n)||!Send(c,"\r\n",2))break;at+=n;}Send(c,"0\r\n\r\n",5);}
@@ -36,7 +36,7 @@ class Server{
         }closesocket(c);
     }}
 public:
-    Server(std::vector<char> op,std::vector<char> vo,std::vector<char> sp={}):opus_(std::move(op)),vorbis_(std::move(vo)),speex_(std::move(sp)){WSADATA d{};Check(!WSAStartup(MAKEWORD(2,2),&d),"WSA init");socket_=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);Check(socket_!=INVALID_SOCKET,"server socket");sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);Check(!bind(socket_,reinterpret_cast<sockaddr*>(&a),sizeof(a)),"server bind");int n=sizeof(a);Check(!getsockname(socket_,reinterpret_cast<sockaddr*>(&a),&n)&&!listen(socket_,5),"server listen");port_=ntohs(a.sin_port);worker_=std::thread([this]{Run();});}
+    Server(std::vector<char> op,std::vector<char> vo,std::vector<char> sp={},std::vector<char> fl={}):opus_(std::move(op)),vorbis_(std::move(vo)),speex_(std::move(sp)),flac_(std::move(fl)){WSADATA d{};Check(!WSAStartup(MAKEWORD(2,2),&d),"WSA init");socket_=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);Check(socket_!=INVALID_SOCKET,"server socket");sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);Check(!bind(socket_,reinterpret_cast<sockaddr*>(&a),sizeof(a)),"server bind");int n=sizeof(a);Check(!getsockname(socket_,reinterpret_cast<sockaddr*>(&a),&n)&&!listen(socket_,5),"server listen");port_=ntohs(a.sin_port);worker_=std::thread([this]{Run();});}
     ~Server(){stop_=true;closesocket(socket_);if(worker_.joinable())worker_.join();WSACleanup();}
     std::wstring Url(const wchar_t* path){return L"http://127.0.0.1:"+std::to_wstring(port_)+path;}
 };
@@ -86,7 +86,19 @@ int wmain(int argc,wchar_t** argv){try{Check(argc==2||argc==3,"usage network_tes
     auto sp=dir/L"radio-speex.spx";MakeSpeex(sp,32000,640001,8003,50);speex=Bytes(sp);
     Check(speex.size()>64*1024,"Speex HTTP fixture exceeds startup probe limit");
 #endif
-    Server server(Bytes(op),Bytes(vo),std::move(speex));
+    auto fl=dir/L"radio-flac.oga";MakeFlac(fl,2,96000,1920001,false);auto flac=Bytes(fl);
+    Check(flac.size()>64*1024,"FLAC HTTP fixture exceeds startup probe limit");
+    Server server(Bytes(op),Bytes(vo),std::move(speex),std::move(flac));
+    for(bool finite:{false,true}){
+        Audio a;Settings s;s.http_seek=true;s.probe_kb=64;s.prebuffer_kb=0;s.stream_buffer_kb=32;std::wstring error;
+        if(!a.Open(server.Url(finite?L"/file-flac":L"/flac.oga").c_str(),s,false,error))throw std::runtime_error(ToUtf8(error));
+        Check(a.Info().seekable==finite&&a.Info().radio!=finite,"FLAC HTTP seeking follows transport");
+        Check(a.Info().duration_ms==-1,"FLAC HTTP startup does not index beyond probe limit");
+        Check(a.Seek(100)==finite,"live FLAC remains forward-only");
+        Pcm pcm(a,s);std::array<short,BlockFrames*2> data{};int frames=0;
+        for(;;){const int n=pcm.Read(data.data(),BlockFrames);Check(n>=0,"FLAC HTTP decode");if(!n)break;frames+=n;}
+        Check(frames==(finite?1910401:1920001),"FLAC HTTP PCM after bounded startup and seek");
+    }
 #ifdef OGG_HAVE_SPEEX
     for(bool finite:{false,true}){
         Audio a;Settings s;s.http_seek=true;s.probe_kb=64;s.prebuffer_kb=0;s.stream_buffer_kb=32;std::wstring error;

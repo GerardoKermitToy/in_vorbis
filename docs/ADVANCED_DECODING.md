@@ -20,6 +20,28 @@ The exact companion is retained across partial reads and native chained-format
 boundaries, and reset on seek. When libFLAC cannot seek a valid very short Ogg
 file, a cancellable decode/discard fallback starts at the beginning.
 
+## Local Ogg duration and seeking
+
+Local Vorbis, Opus, FLAC and Speex files expose their duration before playback
+so Winamp can enable the seek bar. Local Ogg FLAC is scanned with libFLAC's
+frame-skip path (no PCM reconstruction), including files whose STREAMINFO omits
+the sample count. The index retains each link's native rate, sample count and
+comments. Time seeks use the rates of the individual links, not the rate most
+recently played; rewinds and short-file fallbacks retain the complete catalogue.
+FLAC chains use cancellable decode/discard from the beginning for reliable
+cross-link positioning and exact PCM; seeking far into a long chain can be slow.
+Ordinary single-link FLAC uses libFLAC's sample seek with a short-file fallback.
+The same local scan counts compressed Ogg page bytes per FLAC link, including
+its headers/metadata but excluding unrelated streams and any outer RIFF wrapper.
+Average bitrate is available in metadata and Winamp's initial status callback,
+is retained across seeks, and is also the fallback for instantaneous FLAC display.
+It is not the uncompressed sample-rate/channel/bit-depth PCM data rate.
+
+FLAC indexing reads the local file before playback, so opening a large file can
+require additional I/O. HTTP FLAC and Speex startup does not perform this local
+index and keeps the transport's probe limits. Live radio stays forward-only;
+finite HTTP seeking remains opt-in and uses validated Range requests.
+
 ## Opus HD / QEXT
 
 The pinned libopus 1.6.1 build includes QEXT. The independent Ogg packet reader

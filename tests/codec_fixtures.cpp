@@ -2,6 +2,7 @@
 #include <ogg/ogg.h>
 #include <vorbis/vorbisenc.h>
 #include <FLAC/stream_encoder.h>
+#include <FLAC/metadata.h>
 #include <speex/speex.h>
 #include <speex/speex_header.h>
 #include <array>
@@ -25,11 +26,26 @@ void MakeVorbis(const std::filesystem::path& path,int channels,int rate,int fram
     }
     ogg_stream_clear(&stream);vorbis_block_clear(&block);vorbis_dsp_clear(&dsp);vorbis_comment_clear(&vc);vorbis_info_clear(&vi);
 }
-void MakeFlac(const std::filesystem::path& path,int channels,int rate,int frames){
-    auto* encoder=FLAC__stream_encoder_new();Check(encoder,"FLAC encoder");FLAC__stream_encoder_set_channels(encoder,channels);FLAC__stream_encoder_set_bits_per_sample(encoder,16);FLAC__stream_encoder_set_sample_rate(encoder,rate);FLAC__stream_encoder_set_total_samples_estimate(encoder,frames);
-    FILE* file=nullptr;_wfopen_s(&file,path.c_str(),L"w+b");Check(file,"FLAC file");Check(FLAC__stream_encoder_init_ogg_FILE(encoder,file,nullptr,nullptr)==FLAC__STREAM_ENCODER_INIT_STATUS_OK,"FLAC Ogg init");
+void MakeFlac(const std::filesystem::path& path,int channels,int rate,int frames,bool known_total){
+    auto* encoder=FLAC__stream_encoder_new();Check(encoder,"FLAC encoder");FLAC__stream_encoder_set_channels(encoder,channels);FLAC__stream_encoder_set_bits_per_sample(encoder,16);FLAC__stream_encoder_set_sample_rate(encoder,rate);FLAC__stream_encoder_set_total_samples_estimate(encoder,known_total?frames:0);
+    auto* comment=FLAC__metadata_object_new(FLAC__METADATA_TYPE_VORBIS_COMMENT);Check(comment,"FLAC comments");
+    FLAC__StreamMetadata_VorbisComment_Entry title{};
+    Check(FLAC__metadata_object_vorbiscomment_entry_from_name_value_pair(&title,"TITLE","FLAC fixture")&&
+          FLAC__metadata_object_vorbiscomment_append_comment(comment,title,false)&&
+          FLAC__stream_encoder_set_metadata(encoder,&comment,1),"FLAC fixture title");
+    std::ofstream out;
+    if(known_total){
+        FILE* file=nullptr;_wfopen_s(&file,path.c_str(),L"w+b");Check(file,"FLAC file");Check(FLAC__stream_encoder_init_ogg_FILE(encoder,file,nullptr,nullptr)==FLAC__STREAM_ENCODER_INIT_STATUS_OK,"FLAC Ogg init");
+    }else{
+        out.open(path,std::ios::binary);
+        auto write=[](const FLAC__StreamEncoder*,const FLAC__byte bytes[],size_t count,unsigned,unsigned,void* client){
+            auto& file=*static_cast<std::ofstream*>(client);file.write(reinterpret_cast<const char*>(bytes),static_cast<std::streamsize>(count));
+            return file.good()?FLAC__STREAM_ENCODER_WRITE_STATUS_OK:FLAC__STREAM_ENCODER_WRITE_STATUS_FATAL_ERROR;
+        };
+        Check(FLAC__stream_encoder_init_ogg_stream(encoder,nullptr,write,nullptr,nullptr,nullptr,&out)==FLAC__STREAM_ENCODER_INIT_STATUS_OK,"non-seekable FLAC encoder leaves total samples unknown");
+    }
     std::vector<FLAC__int32> pcm(frames*channels);for(int i=0;i<frames;++i)for(int c=0;c<channels;++c)pcm[i*channels+c]=static_cast<FLAC__int32>(std::sin(i*6.283185307179586*(220+c*110)/rate)*8000);
-    Check(FLAC__stream_encoder_process_interleaved(encoder,pcm.data(),frames),"FLAC encode");Check(FLAC__stream_encoder_finish(encoder),"FLAC finish");FLAC__stream_encoder_delete(encoder);
+    Check(FLAC__stream_encoder_process_interleaved(encoder,pcm.data(),frames),"FLAC encode");Check(FLAC__stream_encoder_finish(encoder),"FLAC finish");FLAC__stream_encoder_delete(encoder);FLAC__metadata_object_delete(comment);
 }
 void MakeSpeex(const std::filesystem::path& path,int rate,int frames,int serial,int packets_per_page){
     Check(packets_per_page>0,"Speex fixture page grouping");

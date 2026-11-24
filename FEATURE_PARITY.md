@@ -16,11 +16,12 @@ all Winamp versions or every file in the wild have been tested.
 |---|---|---|
 | Codecs | Ogg Vorbis, Opus, FLAC, Speex | Native sample counts, seek, output formats and resampling for all four |
 | Exact FLAC | Integer companion preserves all source bits in eligible undithered 32-bit output | Native 16/24/32-bit precision, edge values, chunking, seek, native chains, processing fallback and DLL conversion |
+| Local FLAC bitrate | Per-link average from compressed Ogg page bytes and native duration; available at startup and retained across seeks | Exact byte/duration calculation, file/memory/RIFF, mixed-rate links, initial Winamp `SetInfo`, average/instantaneous-display fallback without periodic title refresh |
 | Opus HD | Actual QEXT detection and native 96 kHz decode; ordinary Opus stays 48 kHz | Native sample counts, 30 kHz spectral response, hints, seek and mixed-rate chains |
 | Opus speech | Optional OSCE and eligible 48 kHz BWE; embedded pinned neural tables | Speech/BWE output differences, unchanged frame counts, explicit off policy |
 | Opus Ambisonics | Mapping families 2/3, ACN/SN3D and projection, optional non-diegetic stereo; stereo/headphone/quad/5.1/7.1 rendering | Header/matrix validation, impulse direction, finite guarded buffers, LFE silence, stateful seek and mixed-family chains |
 | Ogg Opus routing | `.ogg`/`.oga` content detection; direct `.ogg` HTTP claim | Winamp input mock and actual RadioSEGA HTTP playback through the DLL |
-| Local files | Unicode paths, read-only fullwidth-pipe path fallback, RIFF/WAVE data wrappers | `ogg_audio` |
+| Local files | Unicode paths, read-only fullwidth-pipe path fallback, RIFF/WAVE data wrappers; startup duration and seeking for all four Ogg codecs, including FLAC with unknown STREAMINFO length | `ogg_audio`, `ogg_plugin`: file/memory transport, forward/backward/EOF/rewind, stable length/tags, paused seek/flush/resume |
 | Multichannel | Vorbis layouts 1–8; source/Windows, raw codec order, stereo, mono, quad, DS and DS2; legacy 5.1 input order | Impulse matrices, channel/layout and exact ordering cases |
 | Chains | Native output drain/reopen on rate/channel changes for playback; fixed-format extended read | Vorbis/Opus/FLAC/Speex segment counts, resampler tail drain, first-block retention, output rejection fallback, seek/stop, DSP/visualization negotiation |
 | PCM | 8-bit unsigned, 16/24/32-bit signed integer; SpeexDSP resampling; rectangular/triangular/Gaussian dither; none/first-order/ATH/low-ATH shaping | Frame guards, distributions, deterministic reset/chunking/channel isolation, overloads, rate fallbacks and shaping spectra |

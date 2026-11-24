@@ -1,6 +1,7 @@
 # Verification — 1.2.1 — 2026-11-24
 
-Version 1.2.1 includes the local Speex seek-bar correction recorded below.
+Version 1.2.1 includes the local Speex seek-bar correction and the subsequent
+local FLAC/all-codec seeking checks recorded below.
 Earlier 1.2.0 runs, package names and checksums are retained as historical records.
 
 ## Final build and regression results
@@ -229,6 +230,94 @@ The core test's `--file FILE` mode and the DLL test's optional local-file argume
 also exercised the supplied 32-kHz mono sample: **263589 ms** before playback,
 with successful seeks to **197691 ms**, **65897 ms** and zero. These are mock-host
 DLL checks, not an installed Winamp or audio-hardware check.
+
+## Local FLAC duration and all-codec seek regressions — 2026-11-24
+
+Final independent Win32 verification passed **15/15 Release** (45.75 s) and
+**15/15 Debug** (64.72 s). Both supplied `.oga` and `.spx` files passed the
+standalone core and real-DLL mock-host seek checks in both configurations.
+
+The supplied `.oga` sample is 96-kHz Ogg FLAC with STREAMINFO total_samples
+unset. Core and DLL tests reproduced an unknown startup duration (`-1 ms`).
+Local FLAC now gets a cancellable frame-skip scan without PCM reconstruction,
+using the EOS granules to retain complete per-link counts, rates and comments.
+Duration is available before playback, including unknown-length headers and
+mixed-rate chains, and the catalogue survives seeks and short-file fallbacks.
+
+The shared local-file matrix covers Vorbis, Opus, FLAC and Speex through file
+and memory transport, including RIFF/WAVE wrappers: startup duration, native
+sample count, repeated forward/backward seeking, seek past EOF, rewind, and
+stable duration/tags. Vorbis past-EOF seeking now clamps to PCM EOF. DLL checks
+cover startup GetFileInfo/GetLength/is_seekable, paused seek/Flush and resume
+for every codec, unknown-length FLAC and a mixed-format FLAC chain.
+
+FLAC-specific coverage includes known/unknown STREAMINFO counts at 44.1/96 kHz,
+mixed-rate/channel chains and repeated 32-bit exact-PCM seeks in both directions.
+A new exact regression caught libFLAC reporting a successful short-chain seek
+with PCM from the wrong link. Chained FLAC therefore uses cancellable,
+time-based decode/discard with each link's native rate; ordinary single-link
+FLAC retains the sample-seek path and short-file fallback. Long chained seeks
+can be slower. Loopback tests use FLAC larger than a 64-KiB startup probe and
+verify bounded live/finite HTTP opening, forward-only radio, validated Range
+seeking and the remaining decoded sample counts.
+
+The supplied FLAC sample reports **30000 ms** before playback and passed core
+seeks to **22500 ms**, **7500 ms** and zero plus the real-DLL mock-host seek
+checks. These are not installed Winamp or audio-hardware checks.
+
+The refreshed `dist/Plugins/in_vorbis.dll` is byte-identical to the tested Release
+output, retains FileVersion/ProductVersion **1.2.1**, and passed the supplied
+FLAC and Speex seek checks directly from staging. Release and Debug build logs
+contain no compiler warnings/errors. No installed Winamp files were changed.
+SHA-256 of the refreshed Release DLL:
+
+```text
+82903fc8080ab1c1519b95cd63dba52be73ae0ed7c19cb3832eb12fca11a4b21  Plugins/in_vorbis.dll
+```
+
+## Local FLAC bitrate display correction — 2026-11-24
+
+Final independent Win32 verification passed **15/15 Release** (56.56 s) and
+**15/15 Debug** (76.17 s), including dynamic CRT, notification, exact-FLAC and
+network regressions. Both supplied files passed core and DLL seek checks in both
+configurations. Both rebuilt DLLs remain PE32/x86 with ASLR/NX; C/C++ build logs
+contain no compiler warnings/errors.
+
+The FLAC reader left LinkInfo.bitrate at zero, so Winamp's initial status used
+the unknown-bitrate placeholder **1 kbps**. New core and DLL notification tests
+reproduced the zero field and incorrect initial SetInfo value.
+
+The existing local frame-skip/indexing pass now also counts compressed Ogg page
+bytes per selected FLAC link, including its headers and comments. Per-link native
+sample counts/rates provide the exact timebase for average bitrate. Counting is
+bounded and occurs on the reads already needed for indexing: it adds no second
+file scan, PCM decode, HTTP startup download or credential handling. RIFF wrapper
+bytes and unrelated Ogg serials are not counted as FLAC data.
+
+The average is available before the first PCM read, survives seeks and chain
+rewinds, and is used as the stable FLAC fallback when instantaneous display is
+enabled. It is not claimed to be a moving per-frame bitrate estimate. Existing
+changed-kbps-only status notifications and title-refresh rules remain unchanged.
+
+Core regressions compare the calculated bitrate against compressed bytes/native
+duration for known/unknown STREAMINFO, file/memory input, RIFF wrappers and
+mixed-rate links. Real-DLL notification tests verify the initial compressed kbps
+in both average and instantaneous-display modes, with no repeated format/status
+or playlist-title updates. The supplied 96-kHz FLAC reports **1652148 bps** and
+the real-DLL mock host receives **1652 kbps**, while the **30000-ms** duration and
+forward/backward/zero/EOF seeking remain intact.
+
+The updated `dist/Plugins/in_vorbis.dll` is byte-identical to the tested Release
+output and passed the supplied-file checks directly from staging, including the
+initial **1652-kbps** callback. FileVersion/ProductVersion remain **1.2.1**.
+SHA-256 (supersedes the earlier seek-only staging hash):
+
+```text
+aef1d68888e77ecc9682cd08605d62e443ff5afdbde7a134d29c79a30954582e  Plugins/in_vorbis.dll
+```
+
+No installed Winamp DLL was replaced. Actual player skin rendering was not
+verified; these status values were captured through the real DLL in mock hosts.
 
 ## Not verified / not performed
 

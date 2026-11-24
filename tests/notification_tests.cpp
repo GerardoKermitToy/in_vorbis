@@ -72,7 +72,7 @@ void Pump() {
     }
 }
 void Run(const char* name, const std::filesystem::path& path, bool instantaneous,
-         const std::vector<Format>& expected, long long frames, bool chained) {
+         const std::vector<Format>& expected, long long frames, bool chained, int expected_kbps = 0) {
     Settings settings; settings.instant_bitrate = instantaneous;
     settings.channels = expected.size() == 1 ? ChannelMode::Stereo : ChannelMode::Source;
     settings.use_host_replaygain = settings.use_host_proxy = false;
@@ -87,6 +87,8 @@ void Run(const char* name, const std::filesystem::path& path, bool instantaneous
     Check(eof == 1 && written == frames, "notification playback frame count and EOF");
     Check(GetTickCount64() - started >= 1000, "exercise multiple bitrate intervals");
     Check(errors == 0, "notification callback contract");
+    if (expected_kbps) Check(!updates.empty() && updates.front().bitrate == expected_kbps,
+        "compressed FLAC bitrate reaches the initial Winamp SetInfo callback");
     Check(formats.size() == expected.size(), "output reopen count");
     for (std::size_t i = 0; i < expected.size(); ++i)
         Check(formats[i].rate == expected[i].rate && formats[i].channels == expected[i].channels,
@@ -216,6 +218,12 @@ int wmain(int argc, wchar_t** argv) {
         Run("Vorbis", vorbis, true, {{44100, 2}}, 88200, false);
         Run("Vorbis native chain", native, true, {{44100, 6}, {48000, 2}}, 92100, false);
         Run("Average bitrate", steady, false, {{48000, 2}}, 96000, false);
+        const auto flac = directory / L"bitrate-flac.oga";
+        MakeFlac(flac, 2, 96000, 192000, false);
+        const int flac_kbps = static_cast<int>((std::filesystem::file_size(flac) * 4 + 500) / 1000);
+        Check(flac_kbps > 1, "FLAC bitrate fixture is not the unknown-bitrate placeholder");
+        Run("FLAC bitrate display", flac, true, {{96000, 2}}, 192000, false, flac_kbps);
+        Run("FLAC average bitrate display", flac, false, {{96000, 2}}, 192000, false, flac_kbps);
         RunIdle(steady);
         input->Quit(); input = nullptr; FreeLibrary(dll); dll = nullptr; DestroyWindow(window); window = nullptr;
         std::cout << "Ogg notifications: no periodic full-format/title refresh, changed kbps, real title changes, native format reopening and average mode passed.\n";

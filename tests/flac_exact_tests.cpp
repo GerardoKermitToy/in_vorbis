@@ -106,6 +106,24 @@ int wmain(int argc, wchar_t** argv) {
         Check(DrainExact(chain_seek, settings, &seek_changes) ==
               std::vector<std::int32_t>(second.begin() + tail_frame * 6, second.end()),
               "cross-link seek preserves exact remaining FLAC samples");
+        Check(chain_seek.Info().links.size()==2&&chain_seek.Info().duration_ms==51,"complete exact FLAC index survives seek");
+        for(int ms:{5,45,0,40}){
+            Check(chain_seek.Seek(ms),"repeat exact FLAC seek across rate/layout boundaries");
+            int repeated_changes=0;auto remaining=DrainExact(chain_seek,settings,&repeated_changes);
+            if(ms<36){
+                auto start=static_cast<size_t>(ms*44100LL/1000)*2;
+                const std::vector<std::int32_t> wanted(expected.begin()+start,expected.end());
+                if(remaining!=wanted){
+                    const auto mismatch=std::mismatch(remaining.begin(),remaining.end(),wanted.begin(),wanted.end());
+                    std::cerr<<"FLAC seek "<<ms<<" ms: got "<<remaining.size()<<", expected "<<wanted.size()<<", mismatch "<<(mismatch.first-remaining.begin())<<", changes "<<repeated_changes<<'\n';
+                }
+                Check(remaining==wanted,"exact FLAC backward seek keeps both links");
+            }else{
+                auto start=static_cast<size_t>((static_cast<long long>(ms)*44100-1601000)*96000/(44100LL*1000))*6;
+                Check(remaining==std::vector<std::int32_t>(second.begin()+start,second.end()),"exact FLAC later-link seek uses native rate");
+            }
+            Check(chain_seek.Info().links.size()==2&&chain_seek.Info().duration_ms==51,"exact FLAC duration is stable");
+        }
         const auto path = directory / L"low-bits.oga";
         const auto original = MakeExact(path, 2, 48000, 32, 1453);
         for (int mode = 0; mode < 3; ++mode) {

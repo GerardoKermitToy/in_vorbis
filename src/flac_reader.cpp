@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "backend.hpp"
 #include <FLAC/stream_decoder.h>
+#include <ogg/ogg.h>
 #include <algorithm>
 #include <cmath>
 #include <climits>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -36,6 +39,47 @@ class FlacReader final : public CodecReader {
     bool input_error_ = false;
     bool failed_ = false;
     bool seeking_ = false;
+    bool indexed_ = false;
+    bool seek_eof_ = false;
+    struct EncodedLink { long serial; std::int64_t bytes; };
+    std::vector<EncodedLink> encoded_links_;
+    ogg_sync_state bitrate_sync_{};
+    bool counting_bytes_ = false;
+    int encoded_link_ = -1;
+
+    bool CountEncodedBytes(const FLAC__byte* data, int bytes) noexcept {
+        try {
+            auto* buffer = ogg_sync_buffer(&bitrate_sync_, bytes);
+            if (!buffer) return false;
+            std::memcpy(buffer, data, bytes);
+            if (ogg_sync_wrote(&bitrate_sync_, bytes)) return false;
+            ogg_page page{};
+            for (;;) {
+                const int result = ogg_sync_pageout(&bitrate_sync_, &page);
+                if (!result) return true;
+                if (result < 0) return false;
+                const auto serial = ogg_page_serialno(&page);
+                if (encoded_link_ < 0 && ogg_page_bos(&page) && page.body_len >= 5 &&
+                    !std::memcmp(page.body, "\177FLAC", 5)) {
+                    if (encoded_links_.size() >= kMaxLinks) return false;
+                    encoded_links_.push_back({serial, 0});
+                    encoded_link_ = static_cast<int>(encoded_links_.size()) - 1;
+                }
+                if (encoded_link_ < 0 || encoded_links_[encoded_link_].serial != serial) continue;
+                auto& link = encoded_links_[encoded_link_];
+                const auto count = static_cast<std::int64_t>(page.header_len) + page.body_len;
+                if (link.bytes > std::numeric_limits<std::int64_t>::max() - count) return false;
+                link.bytes += count;
+                if (ogg_page_eos(&page)) encoded_link_ = -1;
+            }
+        } catch (...) { return false; }
+    }
+
+    void ClearPending() noexcept {
+        pending_.clear(); pending_integer_.clear(); exact_.clear();
+        pending_frames_ = pending_offset_ = pending_channels_ = 0;
+        pending_link_ = -1;
+    }
 
     static bool ValidFormat(unsigned rate, unsigned channels, unsigned bits) noexcept {
         return rate >= 1000 && rate <= 768000 && channels >= 1 && channels <= MaxChannels && bits >= 4 && bits <= 32;
@@ -43,15 +87,15 @@ class FlacReader final : public CodecReader {
 
     void RefreshKnownDuration() noexcept {
         if (info_.links.empty()) return;
-        std::int64_t total = 0;
+        long double total = 0;
         for (const auto& link : info_.links) {
-            if (link.duration_ms < 0 || total > INT_MAX - link.duration_ms) {
+            if (link.frames < 0 || link.rate <= 0) {
                 info_.duration_ms = -1;
                 return;
             }
-            total += link.duration_ms;
+            total += static_cast<long double>(link.frames) * 1000 / link.rate;
         }
-        info_.duration_ms = static_cast<int>(total);
+        info_.duration_ms = total >= INT_MAX ? INT_MAX : static_cast<int>(total);
     }
 
     void PublishPendingLink() {
@@ -94,12 +138,27 @@ class FlacReader final : public CodecReader {
         try {
             if (metadata->type == FLAC__METADATA_TYPE_STREAMINFO) {
                 const auto& streamInfo = metadata->data.stream_info;
-                if (seeking_ && metadata_link_ >= 0 && metadata_link_ < static_cast<int>(info_.links.size())) {
-                    // LibFLAC may replay STREAMINFO while an absolute seek is in progress.
-                    // It is metadata for an existing logical link, not a new chain member.
+                if (!ValidFormat(streamInfo.sample_rate, streamInfo.channels, streamInfo.bits_per_sample)) {
+                    failed_ = true;
                     return;
                 }
-                if (info_.links.size() >= kMaxLinks || !ValidFormat(streamInfo.sample_rate, streamInfo.channels, streamInfo.bits_per_sample)) {
+                if (indexed_ || seeking_) {
+                    const int next = seeking_ ? metadata_link_ : metadata_link_ + 1;
+                    if (next < 0 || next >= static_cast<int>(info_.links.size())) {
+                        failed_ = true;
+                        return;
+                    }
+                    const auto& known = info_.links[next];
+                    if (known.rate != static_cast<int>(streamInfo.sample_rate) ||
+                        known.channels != static_cast<int>(streamInfo.channels) ||
+                        known.bits_per_sample != static_cast<int>(streamInfo.bits_per_sample)) {
+                        failed_ = true;
+                        return;
+                    }
+                    metadata_link_ = next;
+                    return;
+                }
+                if (info_.links.size() >= kMaxLinks) {
                     failed_ = true;
                     return;
                 }
@@ -117,7 +176,7 @@ class FlacReader final : public CodecReader {
                 RefreshKnownDuration();
                 return;
             }
-            if (metadata->type != FLAC__METADATA_TYPE_VORBIS_COMMENT || metadata_link_ < 0 ||
+            if (indexed_ || seeking_ || metadata->type != FLAC__METADATA_TYPE_VORBIS_COMMENT || metadata_link_ < 0 ||
                 metadata_link_ >= static_cast<int>(info_.links.size())) return;
 
             auto& link = info_.links[metadata_link_];
@@ -187,6 +246,11 @@ class FlacReader final : public CodecReader {
         const size_t wanted = std::min(*bytes, static_cast<size_t>(INT_MAX));
         const int received = self->stream_->Read(buffer, static_cast<int>(wanted));
         if (received > 0) {
+            if (self->counting_bytes_ && !self->CountEncodedBytes(buffer, received)) {
+                self->input_error_ = true;
+                *bytes = 0;
+                return FLAC__STREAM_DECODER_READ_STATUS_ABORT;
+            }
             *bytes = static_cast<size_t>(received);
             return FLAC__STREAM_DECODER_READ_STATUS_CONTINUE;
         }
@@ -258,26 +322,70 @@ class FlacReader final : public CodecReader {
         return false;
     }
 
+    bool Restart() {
+        ClearPending();
+        metadata_link_ = -1;
+        failed_ = input_error_ = seeking_ = seek_eof_ = false;
+        if (!indexed_) {
+            info_.links.clear();
+            info_.duration_ms = -1;
+        }
+        // reset() preserves libFLAC's Ogg byte/sample index but rewinds parsing.
+        if (!FLAC__stream_decoder_reset(decoder_) ||
+            !FLAC__stream_decoder_process_until_end_of_metadata(decoder_) ||
+            failed_ || input_error_ || metadata_link_ != 0) return false;
+        info_.current_link = 0;
+        info_.current = info_.links.front();
+        return true;
+    }
+
+    bool Index() {
+        // STREAMINFO may omit total_samples or describe only the first link.
+        // Skip frames without reconstructing PCM, retaining libFLAC's frame
+        // integrity checks and each link's EOS granule/native sample rate.
+        for (;;) {
+            const auto state = FLAC__stream_decoder_get_state(decoder_);
+            if (state == FLAC__STREAM_DECODER_END_OF_STREAM) break;
+            if (state == FLAC__STREAM_DECODER_END_OF_LINK) {
+                const auto before = info_.links.size();
+                if (!FLAC__stream_decoder_finish_link(decoder_) ||
+                    !FLAC__stream_decoder_process_until_end_of_metadata(decoder_) || failed_ || input_error_ ||
+                    info_.links.size() != before + 1) return false;
+            } else if (!FLAC__stream_decoder_skip_single_frame(decoder_) || failed_ || input_error_) return false;
+        }
+        FLAC__uint64* lengths = nullptr;
+        const int count = FLAC__stream_decoder_get_link_lengths(decoder_, &lengths);
+        const std::unique_ptr<FLAC__uint64, decltype(&std::free)> owner(lengths, &std::free);
+        if (!lengths || count != static_cast<int>(info_.links.size()) ||
+            count != static_cast<int>(encoded_links_.size()) || encoded_link_ >= 0) return false;
+        for (int i = 0; i < count; ++i) {
+            if (lengths[i] > static_cast<FLAC__uint64>(std::numeric_limits<std::int64_t>::max())) return false;
+            auto& link = info_.links[i];
+            link.frames = static_cast<std::int64_t>(lengths[i]);
+            link.duration_ms = DurationMs(link.frames, link.rate);
+            link.serial = static_cast<std::uint32_t>(encoded_links_[i].serial);
+            if (link.frames > 0) {
+                const auto bitrate = static_cast<long double>(encoded_links_[i].bytes) * 8 * link.rate / link.frames;
+                link.bitrate = static_cast<int>(std::clamp(bitrate, 1.0L, static_cast<long double>(INT_MAX)));
+            }
+        }
+        RefreshKnownDuration();
+        indexed_ = true;
+        counting_bytes_ = false;
+        ogg_sync_clear(&bitrate_sync_);
+        encoded_links_.clear();
+        return Restart();
+    }
+
     bool LinearSeek(int milliseconds) {
         // libFLAC's interpolation seek cannot position some very short Ogg
-        // files. Decode/discard from the start, keeping exact integer samples.
-        if (decoder_) {
-            if (initialized_) FLAC__stream_decoder_finish(decoder_);
-            FLAC__stream_decoder_delete(decoder_);
-        }
-        decoder_ = nullptr; initialized_ = false;
-        pending_.clear(); pending_integer_.clear(); exact_.clear();
-        pending_frames_ = pending_offset_ = pending_channels_ = 0;
-        pending_link_ = metadata_link_ = -1;
-        failed_ = input_error_ = seeking_ = false;
-        info_ = TrackInfo{};
-        if (!stream_->Seek(0, SEEK_SET)) return false;
-        std::wstring error;
-        if (!Open(stream_, error)) return false;
+        // files. Decode/discard from the start, keeping exact integer samples
+        // and the complete local link catalogue.
+        if (!Restart()) return false;
         long double remaining = milliseconds;
         while (remaining > 0) {
             if (!ProcessNext()) return false;
-            if (!pending_frames_) return remaining < .000001L;
+            if (!pending_frames_) return true;
             const int rate = info_.links[pending_link_].rate;
             const auto skip = static_cast<std::int64_t>(remaining * rate / 1000.0L + 1e-9L);
             const int available = pending_frames_ - pending_offset_;
@@ -296,6 +404,7 @@ class FlacReader final : public CodecReader {
 
 public:
     ~FlacReader() override {
+        if (counting_bytes_) ogg_sync_clear(&bitrate_sync_);
         if (decoder_) {
             if (initialized_) FLAC__stream_decoder_finish(decoder_);
             FLAC__stream_decoder_delete(decoder_);
@@ -319,6 +428,15 @@ public:
             return false;
         }
         const bool seekable = stream_->Seekable();
+        // Observe the existing sequential local scan, including metadata reads.
+        // Transport tell offsets alone overcount links because libFLAC reads ahead.
+        if (seekable && stream_->Local()) {
+            if (ogg_sync_init(&bitrate_sync_)) {
+                error = L"Cannot initialize Ogg FLAC bitrate indexing.";
+                return false;
+            }
+            counting_bytes_ = true;
+        }
         const auto status = FLAC__stream_decoder_init_ogg_stream(
             decoder_, ReadCallback, seekable ? SeekCallback : nullptr, seekable ? TellCallback : nullptr,
             seekable ? LengthCallback : nullptr, seekable ? EofCallback : nullptr,
@@ -338,12 +456,18 @@ public:
         info_.current_link = 0;
         info_.current = info_.links.front();
         if (info_.links.size() == 1) RefreshKnownDuration();
+        // HTTP startup must remain bounded, even when Range seeking is enabled.
+        if (seekable && stream_->Local() && !Index()) {
+            error = L"Cannot index local Ogg FLAC links.";
+            return false;
+        }
         return true;
     }
 
     int Read(float* samples, int capacityFrames) override {
         if (!samples || capacityFrames <= 0 || !decoder_) return -1;
         exact_.clear();
+        if (seek_eof_) return 0;
         const int available = CopyPending(samples, capacityFrames);
         if (available) return available;
         if (failed_) return -1;
@@ -355,19 +479,24 @@ public:
 
     bool Seek(int milliseconds) override {
         if (!decoder_ || !info_.seekable || milliseconds < 0) return false;
-        const int rate = info_.current.rate;
-        if (rate <= 0) return false;
-        pending_.clear();pending_integer_.clear();exact_.clear();
-        pending_frames_ = pending_offset_ = pending_channels_ = 0;
-        pending_link_ = -1;
-        input_error_ = failed_ = false;
-        const auto target = static_cast<FLAC__uint64>(static_cast<long double>(milliseconds) * rate / 1000.0L);
+        // Unindexed HTTP and chains use time-based discard, with each link's
+        // own rate. libFLAC's interpolation can report success in the wrong
+        // link on very short chains; do not publish that PCM as a valid seek.
+        if (!indexed_ || info_.links.size() != 1) return LinearSeek(milliseconds);
+        ClearPending();
+        input_error_ = failed_ = seek_eof_ = false;
+        const auto& link = info_.links.front();
+        const auto target = static_cast<FLAC__uint64>(static_cast<long double>(milliseconds) * link.rate / 1000);
+        if (target >= static_cast<FLAC__uint64>(link.frames)) {
+            seek_eof_ = true;
+            return true;
+        }
+        metadata_link_ = 0;
         seeking_ = true;
         const bool sought = FLAC__stream_decoder_seek_absolute(decoder_, target);
         seeking_ = false;
         if (!sought || failed_ || input_error_) {
             const bool can_retry = !failed_ && !input_error_;
-            FLAC__stream_decoder_flush(decoder_);
             return can_retry && LinearSeek(milliseconds);
         }
         return true;

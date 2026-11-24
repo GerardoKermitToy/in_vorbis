@@ -215,7 +215,8 @@ public:
     bool Seek(int milliseconds) override {
         if (!opened_ || !info_.seekable || milliseconds < 0) return false;
         const double target = static_cast<double>(milliseconds) / 1000.0;
-        if (ov_time_seek(&file_, target) != 0) return false;
+        const bool past_end = info_.duration_ms >= 0 && milliseconds > info_.duration_ms;
+        if ((past_end ? ov_pcm_seek(&file_, ov_pcm_total(&file_, -1)) : ov_time_seek(&file_, target)) != 0) return false;
 
         double elapsed = 0.0;
         int link = 0;

@@ -7,7 +7,8 @@
 #include <cmath>
 #include <iostream>
 namespace{
-std::atomic<long long> frames{0};std::atomic<int> flushes{0};int channels=0,bits=0,opens=0,closes=0;
+std::atomic<long long> frames{0};std::atomic<int> flushes{0},reported_kbps{0};int channels=0,bits=0,opens=0,closes=0;
+void __cdecl SetInfo(int kbps,int,int,int){if(kbps>0)reported_kbps=kbps;}
 int __cdecl Open(int rate,int ch,int depth,int,int){Check(rate>=8000&&rate<=192000,"output rate");channels=ch;bits=depth;++opens;return 0;}
 void __cdecl Close(){++closes;}
 int __cdecl Write(char* p,int n){Check(p&&n>0&&n<=8192&&n%(channels*bits/8)==0,"write bounds");frames+=n/(channels*bits/8);return 0;}
@@ -16,7 +17,8 @@ void CheckLocalSeeks(winamp::InModule* in,const std::filesystem::path& path){
     int duration=-1;in->GetFileInfo(path.c_str(),nullptr,&duration);
     std::cout<<"DLL local duration before playback: "<<duration<<" ms\n";
     Check(duration>0,"DLL reports local duration before playback");
-    Check(!in->Play(path.c_str()),"DLL local seek playback");in->Pause();
+    reported_kbps=0;Check(!in->Play(path.c_str()),"DLL local seek playback");in->Pause();
+    std::cout<<"DLL initial displayed bitrate: "<<reported_kbps<<" kbps\n";
     Check(in->is_seekable&&in->GetLength()==duration,"DLL enables seek bar at startup");
     for(int position:{duration*3/4,duration/4,duration,0}){
         const int before=flushes;in->SetOutputTime(position);const auto end=GetTickCount64()+10000;
@@ -31,7 +33,7 @@ void CheckLocalSeeks(winamp::InModule* in,const std::filesystem::path& path){
 }
 int wmain(int argc,wchar_t** argv){RegistrySandbox registry;HMODULE dll=nullptr;winamp::InModule* in=nullptr;try{
     Check(argc==3||argc==4,"usage: plugin_tests DLL DIRECTORY [RADIO_URL|LOCAL_FILE]");auto dir=std::filesystem::path(argv[2]);std::filesystem::create_directories(dir);auto vorbis=dir/L"file.ogg",opus=dir/L"file.oga";MakeVorbis(vorbis,2,44100,12001,4001);MakeOpus(opus,6,12001,4002);
-    dll=LoadLibraryExW(argv[1],nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);Check(dll,"load DLL");auto get=reinterpret_cast<winamp::InModule*(__cdecl*)()>(GetProcAddress(dll,"winampGetInModule2"));Check(get,"plugin entry");in=get();winamp::OutModule out{};out.Open=Open;out.Close=Close;out.Write=Write;out.CanWrite=CanWrite;out.IsPlaying=Playing;out.Pause=Pause;out.Flush=Flush;out.GetOutputTime=Time;out.GetWrittenTime=Time;in->outMod=&out;in->hDllInstance=dll;in->Init();
+    dll=LoadLibraryExW(argv[1],nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);Check(dll,"load DLL");auto get=reinterpret_cast<winamp::InModule*(__cdecl*)()>(GetProcAddress(dll,"winampGetInModule2"));Check(get,"plugin entry");in=get();winamp::OutModule out{};out.Open=Open;out.Close=Close;out.Write=Write;out.CanWrite=CanWrite;out.IsPlaying=Playing;out.Pause=Pause;out.Flush=Flush;out.GetOutputTime=Time;out.GetWrittenTime=Time;in->outMod=&out;in->SetInfo=SetInfo;in->hDllInstance=dll;in->Init();
     for(auto path:{vorbis,opus}){Check(in->IsOurFile(path.c_str()),"Ogg codec claim");frames=0;Check(!in->Play(path.c_str()),"play codec through DLL");auto end=GetTickCount64()+10000;while(frames<12001&&GetTickCount64()<end)Sleep(1);in->Stop();Check(frames==12001,"DLL output sample count");}
     Check(in->IsOurFile(L"http://icecast.radiosega.net:8006/rs-opus.ogg"),"claim RadioSEGA without network suffix");
     using OpenRead=intptr_t(__cdecl*)(const wchar_t*,int*,int*,int*,int*);using Read=size_t(__cdecl*)(intptr_t,char*,size_t,int*);using CloseRead=void(__cdecl*)(intptr_t);
@@ -61,6 +63,10 @@ int wmain(int argc,wchar_t** argv){RegistrySandbox registry;HMODULE dll=nullptr;
     Check(!set_tag(opus.c_str(),"replaygain_track_gain",L"not a gain"),"reject malformed ReplayGain");
     Check(set_tag(opus.c_str(),"replaygain_track_gain",L"")&&write_tags(),"Opus ReplayGain deletion");
     Check(!get_tag(opus.c_str(),"r128_track_gain",tag,256),"Opus gain tombstone");
+    auto flac=dir/L"seek-flac.oga",unknown_flac=dir/L"seek-unknown-flac.oga";
+    MakeFlac(flac,2,44100,96001);MakeFlac(unknown_flac,1,96000,288001,false);
+    for(auto path:{vorbis,opus,flac,unknown_flac})CheckLocalSeeks(in,path);
+    auto flac_chain=dir/L"seek-flac-chain.oga";MakeFlac(flac_chain,2,44100,44100,false);AppendFile(flac_chain,unknown_flac);CheckLocalSeeks(in,flac_chain);
 #ifdef OGG_HAVE_SPEEX
     auto speex=dir/L"seek.spx";MakeSpeex(speex,32000,96001,4003,50);CheckLocalSeeks(in,speex);
 #endif
